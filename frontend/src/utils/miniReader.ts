@@ -116,6 +116,12 @@ export function resolveMiniKeyAction(
   }
 }
 
+/** 迷你模式按下鼠标中键立即隐藏窗口(reader_mac 的 handleMiddleMouseDown)。
+ *  优先于常规快捷键里给中键绑定的动作: 小窗里中键就是「藏起来」。 */
+export function isMiniHideMouseButton(button: number): boolean {
+  return button === 1
+}
+
 /** 按住正文移动超过这个距离(像素)才算拖动窗口, 否则仍是一次点击。 */
 export const MINI_DRAG_THRESHOLD = 4
 

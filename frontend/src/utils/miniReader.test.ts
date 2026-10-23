@@ -5,6 +5,7 @@ import {
   MINI_AUTO_SCROLL_SPEED_MIN,
   exceedsMiniDragThreshold,
   isLightMiniBackground,
+  isMiniHideMouseButton,
   miniBackgroundFill,
   normalizeMiniColor,
   normalizeMiniOpacity,
@@ -74,6 +75,15 @@ describe('迷你外观取值', () => {
   it('按亮度判断深浅底色', () => {
     expect(isLightMiniBackground('#f2efe7')).toBe(true)
     expect(isLightMiniBackground('#282c34')).toBe(false)
+  })
+})
+
+describe('isMiniHideMouseButton', () => {
+  it('只有中键隐藏窗口, 左键拖动/右键面板不受影响', () => {
+    expect(isMiniHideMouseButton(1)).toBe(true)
+    expect(isMiniHideMouseButton(0)).toBe(false)
+    expect(isMiniHideMouseButton(2)).toBe(false)
+    expect(isMiniHideMouseButton(3)).toBe(false)
   })
 })
 

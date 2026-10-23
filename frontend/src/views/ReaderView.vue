@@ -477,6 +477,7 @@ import MiniReaderPanel from '../components/reader/MiniReaderPanel.vue'
 import {
   MINI_AUTO_SCROLL_RESUME_MS,
   exceedsMiniDragThreshold,
+  isMiniHideMouseButton,
   resolveMiniKeyAction,
   stepMiniAutoScrollSpeed,
 } from '../utils/miniReader'
@@ -2619,7 +2620,8 @@ function handleManualReadingInput() {
 /* ─── 迷你模式(移植自 reader_mac 的悬浮阅读器) ───
  *  - 按住正文拖动即移动窗口; 移动不足阈值仍算一次点击, 点击翻页/呼出工具栏照旧。
  *  - 右键弹出紧凑面板(字号、行距、文字/背景色、透明度), 打开期间停住自动滚动。
- *  - 固定键位见 utils/miniReader 的 resolveMiniKeyAction; Esc 隐藏窗口, 从托盘图标唤回。 */
+ *  - 固定键位见 utils/miniReader 的 resolveMiniKeyAction; Esc 或鼠标中键隐藏窗口,
+ *    从 Dock / 托盘图标唤回。 */
 const miniPanel = ref({ visible: false, x: 0, y: 0 })
 const miniSpeedHint = ref('')
 let miniSpeedHintTimer: number | null = null
@@ -2696,6 +2698,7 @@ async function exitMiniFromPanel() {
 /** Esc / 面板里的「隐藏窗口」: 停止自动滚动、先落盘进度, 再隐藏整个窗口。 */
 async function hideMiniWindow() {
   closeMiniPanel()
+  if (store.activePanel) store.closePanel()
   store.isAutoScrolling = false
   persistReadingProgressTemporaryKeepalive()
   if (!isTauriRuntime()) return
@@ -3506,6 +3509,13 @@ function mouseButtonHotkeyAction(e: MouseEvent): HotkeyActionId | null {
  *  侧键前进/后退在松开时触发 —— 因此命中的按键要在 mousedown、mouseup、
  *  auxclick 三处一致地拦掉。 */
 function handleReaderMouseDown(e: MouseEvent) {
+  // 迷你模式: 按下中键立即隐藏窗口, 不再走常规的中键快捷键。
+  if (appStore.miniMode && isMiniHideMouseButton(e.button)) {
+    e.preventDefault()
+    e.stopPropagation()
+    void hideMiniWindow()
+    return
+  }
   if (isMouseButtonHotkeyBlocked(e.target)) return
   if (!mouseButtonHotkeyAction(e)) return
 
@@ -3529,6 +3539,10 @@ function handleReaderMouseDown(e: MouseEvent) {
 
 /** 中键点击链接会在新标签打开(auxclick 默认行为), 命中绑定时一并拦掉。 */
 function handleReaderAuxClick(e: MouseEvent) {
+  if (appStore.miniMode && isMiniHideMouseButton(e.button)) {
+    e.preventDefault()
+    return
+  }
   if (isMouseButtonHotkeyBlocked(e.target)) return
   if (!mouseButtonHotkeyAction(e)) return
   e.preventDefault()
@@ -3540,6 +3554,11 @@ function handleReaderAuxClick(e: MouseEvent) {
  *  用捕获阶段: 要抢在 document 冒泡阶段的选区菜单监听之前, 且中键/侧键的松开
  *  本就不该被当成一次文本选择。 */
 function handleReaderMouseUpForHotkey(e: MouseEvent) {
+  if (appStore.miniMode && isMiniHideMouseButton(e.button)) {
+    e.preventDefault()
+    e.stopPropagation()
+    return
+  }
   if (isMouseButtonHotkeyBlocked(e.target)) return
   if (!mouseButtonHotkeyAction(e)) return
   e.preventDefault()
