@@ -2640,6 +2640,12 @@ function handleScrollContainerMouseDown(e: MouseEvent) {
 
 function handleMiniDragMove(e: MouseEvent) {
   if (!miniDragStart) return
+  // 左键已经松开却没收到 mouseup(按下的是窗口边缘, 松手被系统的缩放过程接走):
+  // 作废这次跟踪, 否则下次移动鼠标会凭空把窗口拖走。
+  if ((e.buttons & 1) === 0) {
+    endMiniDragTracking()
+    return
+  }
   if (!exceedsMiniDragThreshold(e.clientX - miniDragStart.x, e.clientY - miniDragStart.y)) return
   endMiniDragTracking()
   suppressClickAfterMiniDrag = true
@@ -2747,12 +2753,6 @@ function handleMiniKeydown(e: KeyboardEvent): boolean {
       container.scrollBy({ top: action === 'scrollUp' ? -line : line, behavior: 'instant' })
       return true
     }
-    case 'nextChapter':
-      void nextChapter()
-      return true
-    case 'prevChapter':
-      void prevChapter()
-      return true
     case 'slowerAutoScroll':
     case 'fasterAutoScroll': {
       const speed = stepMiniAutoScrollSpeed(config.value.autoScrollSpeed, action === 'fasterAutoScroll' ? 1 : -1)

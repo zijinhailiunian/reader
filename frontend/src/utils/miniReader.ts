@@ -81,8 +81,6 @@ export type MiniKeyAction =
   | 'hideWindow'
   | 'scrollUp'
   | 'scrollDown'
-  | 'nextChapter'
-  | 'prevChapter'
   | 'slowerAutoScroll'
   | 'fasterAutoScroll'
 
@@ -90,8 +88,9 @@ export type MiniKeyAction =
  *
  *  - `/` 开关自动滚动; `Esc` 停止自动滚动并隐藏窗口。
  *  - 上/下: 按住持续滚动正文。
- *  - 左/右: 自动滚动时减速/加速; 否则左键下一章、右键上一章。
- *    左右与常规阅读相反, 这是 reader_mac 的约定(见其 CONTEXT.md「章节导航」)。
+ *  - 左/右: 只在自动滚动时接管, 用来减速/加速; 手动阅读时不接管, 仍按用户在
+ *    常规快捷键里的设置翻页/切章(用户要求与常规阅读方向一致, 不沿用 reader_mac
+ *    「左键下一章」的约定)。
  *
  *  带任何修饰键都不接管, 交还给常规快捷键。未列出的键返回 null。 */
 export function resolveMiniKeyAction(
@@ -109,9 +108,9 @@ export function resolveMiniKeyAction(
     case 'ArrowDown':
       return 'scrollDown'
     case 'ArrowLeft':
-      return isAutoScrolling ? 'slowerAutoScroll' : 'nextChapter'
+      return isAutoScrolling ? 'slowerAutoScroll' : null
     case 'ArrowRight':
-      return isAutoScrolling ? 'fasterAutoScroll' : 'prevChapter'
+      return isAutoScrolling ? 'fasterAutoScroll' : null
     default:
       return null
   }

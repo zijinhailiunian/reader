@@ -13,9 +13,9 @@ import {
 } from './miniReader'
 
 describe('resolveMiniKeyAction', () => {
-  it('左右键在手动阅读时切章: 左键下一章, 右键上一章(沿用 reader_mac)', () => {
-    expect(resolveMiniKeyAction({ key: 'ArrowLeft' }, false)).toBe('nextChapter')
-    expect(resolveMiniKeyAction({ key: 'ArrowRight' }, false)).toBe('prevChapter')
+  it('手动阅读时不接管左右键, 交还常规快捷键(方向与常规阅读一致)', () => {
+    expect(resolveMiniKeyAction({ key: 'ArrowLeft' }, false)).toBeNull()
+    expect(resolveMiniKeyAction({ key: 'ArrowRight' }, false)).toBeNull()
   })
 
   it('自动滚动时左右键只调速, 不切章', () => {
