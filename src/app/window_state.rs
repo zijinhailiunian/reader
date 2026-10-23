@@ -91,6 +91,8 @@ const SAVE_THROTTLE: Duration = Duration::from_millis(1000);
 pub struct WindowStateStore {
     path: PathBuf,
     last_save: Option<Instant>,
+    /// 节流期间丢掉过变化、已安排在节流结束时补存一次。
+    trailing_save_pending: bool,
     /// 上次读写到的状态。事件处理里每个节流窗口都会用到它, 缓存避免反复读盘;
     /// 最大化与迷你模式也靠它保留另一套几何信息。
     cached: Option<WindowState>,
@@ -105,6 +107,7 @@ impl WindowStateStore {
         Self {
             path,
             last_save: None,
+            trailing_save_pending: false,
             cached,
         }
     }
@@ -124,6 +127,29 @@ impl WindowStateStore {
                 true
             }
         }
+    }
+
+    /// 一次变化被节流丢掉时调用: 若还没安排补存, 返回距节流结束还要等多久,
+    /// 调用方到点后补存一次; 已安排过则返回 None, 避免每个事件都排一次。
+    ///
+    /// 只做"首次"节流会丢掉拖动/缩放的最后一下(恰恰是最终位置), 等到正常退出
+    /// 才补写; 应用被强制结束时就停在中间值上。切换迷你模式后 macOS 异步应用
+    /// 新尺寸, 那次 Resized 也常落在节流窗口里, 于是小窗尺寸被记成大窗。
+    pub fn claim_trailing_save(&mut self) -> Option<Duration> {
+        if self.trailing_save_pending {
+            return None;
+        }
+        self.trailing_save_pending = true;
+        let elapsed = self
+            .last_save
+            .map(|last| last.elapsed())
+            .unwrap_or(SAVE_THROTTLE);
+        Some(SAVE_THROTTLE.saturating_sub(elapsed))
+    }
+
+    /// 补存执行时调用, 之后再被节流的变化可以重新安排补存。
+    pub fn finish_trailing_save(&mut self) {
+        self.trailing_save_pending = false;
     }
 
     pub fn save(&mut self, state: WindowState) {
@@ -353,10 +379,11 @@ impl InitialGeometry {
     /// 有对应样式, 因此可以把它作为常规模式的窗口下限。
     pub const MIN_WIDTH: f64 = 420.0;
     pub const MIN_HEIGHT: f64 = 320.0;
-    /// 迷你模式默认尺寸。刻意小于常规下限 —— 迷你模式的控件只有
-    /// 上一章/下一章/目录, 不需要完整布局的宽度, 因此单独放开下限。
-    pub const MINI_WIDTH: f64 = 320.0;
-    pub const MINI_HEIGHT: f64 = 240.0;
+    /// 迷你模式默认尺寸, 取 reader_mac 浮窗的默认值(380×520): 竖长的小窗
+    /// 适合连续阅读, 右键设置面板也能完整放下, 不必在面板里滚动。
+    /// 用户缩小后按记下的尺寸恢复, 下限见 `MINI_MIN_*`。
+    pub const MINI_WIDTH: f64 = 380.0;
+    pub const MINI_HEIGHT: f64 = 520.0;
     /// 迷你模式下窗口允许的最小尺寸。比 `MINI_WIDTH/HEIGHT` 再小一点,
     /// 让用户能继续往里拖, 但不至于小到无法点击那三个按钮。
     pub const MINI_MIN_WIDTH: f64 = 240.0;
@@ -599,6 +626,24 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// 节流期间被丢掉的变化要安排且只安排一次补存, 补存完成后可再次安排。
+    #[test]
+    fn throttled_changes_schedule_one_trailing_save() {
+        let dir = std::env::temp_dir().join("reader-window-state-test-trailing");
+        let _ = std::fs::create_dir_all(&dir);
+        let mut store = WindowStateStore::new(dir.join("window-state.json"));
+
+        assert!(store.should_save_now());
+        assert!(!store.should_save_now());
+        let delay = store.claim_trailing_save().expect("首次被节流应安排补存");
+        assert!(delay <= SAVE_THROTTLE);
+        assert!(store.claim_trailing_save().is_none(), "已安排时不重复安排");
+
+        store.finish_trailing_save();
+        assert!(store.claim_trailing_save().is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn load_returns_none_for_missing_or_broken_file() {
         let dir = std::env::temp_dir().join("reader-window-state-test-broken");
@@ -664,7 +709,7 @@ mod tests {
         assert_eq!(loaded.width, 900.0);
         assert!(!loaded.mini_mode);
         assert_eq!(loaded.mini_width, None);
-        // 未调整过迷你尺寸时应退回内置默认值(320×240)。
+        // 未调整过迷你尺寸时应退回内置默认值。
         assert_eq!(
             loaded.mini_size(),
             (InitialGeometry::MINI_WIDTH, InitialGeometry::MINI_HEIGHT)
@@ -702,14 +747,14 @@ mod tests {
         assert!(position.is_none());
     }
 
-    /// 关键: 320×240 的迷你尺寸必须能原样保留。
+    /// 关键: 用户缩到 320×240 的迷你尺寸必须能原样保留。
     /// 若误用常规下限(420×320), 它会被抬回去, 用户永远缩不到目标尺寸。
     #[test]
     fn mini_size_is_not_clamped_by_normal_minimum() {
         let monitors = [monitor(0.0, 0.0, 1920.0, 1080.0)];
         let (size, _) = sanitize_geometry(
-            InitialGeometry::MINI_WIDTH,
-            InitialGeometry::MINI_HEIGHT,
+            320.0,
+            240.0,
             100.0,
             100.0,
             &monitors,
@@ -720,8 +765,8 @@ mod tests {
 
         // 同一尺寸在常规下限下会被抬到 420×320 —— 这正是需要按模式取下限的原因。
         let (normal_size, _) = sanitize_geometry(
-            InitialGeometry::MINI_WIDTH,
-            InitialGeometry::MINI_HEIGHT,
+            320.0,
+            240.0,
             100.0,
             100.0,
             &monitors,
@@ -737,10 +782,10 @@ mod tests {
         let (min_w, min_h) = InitialGeometry::min_size_for(true);
         assert!(min_w < InitialGeometry::MINI_WIDTH);
         assert!(min_h < InitialGeometry::MINI_HEIGHT);
-        // 常规下限仍应大于迷你默认尺寸, 保证两套模式的定位不混淆。
+        // 迷你下限必须低于常规下限, 否则小窗缩不到常规模式做不到的尺寸。
         let (normal_w, normal_h) = InitialGeometry::min_size_for(false);
-        assert!(normal_w > InitialGeometry::MINI_WIDTH);
-        assert!(normal_h > InitialGeometry::MINI_HEIGHT);
+        assert!(normal_w > min_w);
+        assert!(normal_h > min_h);
     }
 
     /// 迷你模式解析出的初始几何不应带最大化标志(两者互斥)。

@@ -138,12 +138,10 @@ pub fn toggle_mini_mode(app: tauri::AppHandle) -> Result<WindowMode, String> {
         let _ = window.set_always_on_top(false);
     }
 
-    // 3) 收尾: 把系统在 set_size 时做的尺寸修正(最小尺寸约束、显示器上限裁剪)
-    //    记下来, 而不是残留我们请求的值。
-    if let Some(final_state) = capture(&window, Some(state)) {
-        state = final_state;
-    }
-    write_state(&app, state)?;
+    // 3) 不在这里回读窗口几何: macOS 上 set_size/set_position 是异步生效的,
+    //    此刻读到的仍是切换前的尺寸, 会把大窗尺寸记进迷你几何(反之亦然)。
+    //    系统实际应用的尺寸(含最小尺寸约束、显示器裁剪)由随后的 Resized/Moved
+    //    事件写入 —— 那边的节流会在节流结束时补存最后一次变化。
 
     Ok(WindowMode {
         mini_mode: state.mini_mode,

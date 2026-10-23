@@ -464,6 +464,25 @@ fn persist_window_state(app: &tauri::AppHandle, window: &tauri::WebviewWindow, f
         return;
     };
     if !force && !store.should_save_now() {
+        // 被节流的这次变化可能就是最后一次(拖动/缩放松手、切换迷你模式后系统
+        // 异步应用的新尺寸)。到节流结束时补存一次, 不必等到退出才落盘。
+        // 补存回到主线程执行, 与事件回调同一线程取锁、读窗口, 不会互相等待。
+        if let Some(delay) = store.claim_trailing_save() {
+            let app = app.clone();
+            let window = window.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(delay);
+                let main_app = app.clone();
+                let _ = main_app.run_on_main_thread(move || {
+                    if let Some(store) = app.try_state::<Mutex<WindowStateStore>>() {
+                        if let Ok(mut store) = store.lock() {
+                            store.finish_trailing_save();
+                        }
+                    }
+                    persist_window_state(&app, &window, true);
+                });
+            });
+        }
         return;
     }
     // 最小化时位置无意义(Windows 会报告 -32000), capture 内部会返回 None,
