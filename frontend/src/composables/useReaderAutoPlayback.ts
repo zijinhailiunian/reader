@@ -69,6 +69,8 @@ export function useReaderAutoPlayback(
 ) {
   let autoScrollId: number | null = null
   let autoScrollResumeTimer: number | null = null
+  /** 迷你模式右键面板打开期间停住自动滚动(见 holdAutoScroll)。 */
+  let autoScrollHeld = false
   let lastAutoScrollTime = 0
   let autoScrollRemainder = 0
   let speechRestartTimer: number | null = null
@@ -455,7 +457,7 @@ export function useReaderAutoPlayback(
   }
 
   function startAutoScroll() {
-    if (autoScrollId) return
+    if (autoScrollId || autoScrollHeld) return
     lastAutoScrollTime = 0
     autoScrollRemainder = 0
     runAutoScroll()
@@ -465,8 +467,8 @@ export function useReaderAutoPlayback(
    * 手动输入(滚轮/触摸/点击/按键)时暂停自动滚动, 静止片刻后自动恢复。
    * 自动滚动期间用户仍可自由拖动阅读位置。
    */
-  function pauseAutoScrollForManualInput() {
-    if (!store.isAutoScrolling) return
+  function pauseAutoScrollForManualInput(resumeDelayMs = AUTO_SCROLL_MANUAL_RESUME_MS) {
+    if (!store.isAutoScrolling || autoScrollHeld) return
     if (autoScrollId) {
       cancelAnimationFrame(autoScrollId)
       autoScrollId = null
@@ -474,8 +476,30 @@ export function useReaderAutoPlayback(
     if (autoScrollResumeTimer) clearTimeout(autoScrollResumeTimer)
     autoScrollResumeTimer = window.setTimeout(() => {
       autoScrollResumeTimer = null
-      if (store.isAutoScrolling) startAutoScroll()
-    }, AUTO_SCROLL_MANUAL_RESUME_MS)
+      if (store.isAutoScrolling && !autoScrollHeld) startAutoScroll()
+    }, resumeDelayMs)
+  }
+
+  /**
+   * 临时停住自动滚动但不关闭它(迷你模式打开右键面板时), releaseAutoScroll 后按原速度继续。
+   * 停住期间手动输入不会提前把它恢复。
+   */
+  function holdAutoScroll() {
+    autoScrollHeld = true
+    if (autoScrollId) {
+      cancelAnimationFrame(autoScrollId)
+      autoScrollId = null
+    }
+    if (autoScrollResumeTimer) {
+      clearTimeout(autoScrollResumeTimer)
+      autoScrollResumeTimer = null
+    }
+  }
+
+  function releaseAutoScroll() {
+    if (!autoScrollHeld) return
+    autoScrollHeld = false
+    if (store.isAutoScrolling) startAutoScroll()
   }
 
   function stopAutoScroll() {
@@ -1088,6 +1112,8 @@ export function useReaderAutoPlayback(
     startAutoScroll,
     stopAutoScroll,
     pauseAutoScrollForManualInput,
+    holdAutoScroll,
+    releaseAutoScroll,
     startSpeech,
     speechPrev,
     speechNext,

@@ -1,7 +1,7 @@
 <template>
   <div
     class="reader-view"
-    :class="{ 'disable-system-callout': disableSystemCallout }"
+    :class="{ 'disable-system-callout': disableSystemCallout, 'mini-reader': appStore.miniMode }"
     :style="{
       background: shellPaintsBackground ? 'transparent' : theme.body,
       color: theme.fontColor,
@@ -84,9 +84,24 @@
       @seekChapter="jumpFromCatalog"
     />
 
+    <!-- 迷你模式: reader_mac 式右键面板, 以及调速时短暂显示的速度提示。 -->
+    <MiniReaderPanel
+      v-if="miniPanel.visible"
+      :x="miniPanel.x"
+      :y="miniPanel.y"
+      @bookshelf="openPanelFromMini('bookshelf')"
+      @chapters="openPanelFromMini('catalog')"
+      @toggle-auto-scroll="toggleAutoScrollFromMini"
+      @exit-mini="exitMiniFromPanel"
+      @hide="hideMiniWindow"
+    />
+    <Transition name="fade">
+      <div v-if="miniSpeedHint" class="mini-speed-hint" role="status">{{ miniSpeedHint }}</div>
+    </Transition>
+
     <Transition name="auto-reading-status">
       <div
-        v-if="store.isAutoScrolling"
+        v-if="store.isAutoScrolling && !appStore.miniMode"
         class="auto-reading-status"
         role="status"
         aria-live="polite"
@@ -149,7 +164,7 @@
       ref="scrollContainerRef"
       @scroll="handleScroll"
       @load.capture="handleReaderImageLoad"
-      @mousedown="handleManualReadingInput"
+      @mousedown="handleScrollContainerMouseDown"
       @wheel="handleManualReadingInput"
       @touchstart="handleTouchStart"
       @touchmove="handleTouchMove"
@@ -458,6 +473,13 @@ import {
 import type { Book } from '../types'
 
 import ReaderMobileControls from '../components/reader/ReaderMobileControls.vue'
+import MiniReaderPanel from '../components/reader/MiniReaderPanel.vue'
+import {
+  MINI_AUTO_SCROLL_RESUME_MS,
+  exceedsMiniDragThreshold,
+  resolveMiniKeyAction,
+  stepMiniAutoScrollSpeed,
+} from '../utils/miniReader'
 import SourceBrowserPanel from '../components/SourceBrowserPanel.vue'
 import { useReaderSearch, type SearchLocateOptions } from '../composables/useReaderSearch'
 import { useReaderSelection } from '../composables/useReaderSelection'
@@ -533,14 +555,19 @@ const readerBackgroundSource = computed(() => resolveReaderBackground({
 /** 背景图由 App 外壳在最底层统一铺(标题栏也在其内), 这里只要让开位置。
  *  阅读页自己再铺一层会导致同一张图叠两次、透明度相乘。 */
 const shellPaintsBackground = computed(() => (
-  readerBackgroundSource.value === 'readerImage' || readerBackgroundSource.value === 'desktopImage'
+  // 迷你模式有自己的外观(可透出桌面), 不铺背景图。
+  !appStore.miniMode
+  && (readerBackgroundSource.value === 'readerImage' || readerBackgroundSource.value === 'desktopImage')
 ))
 /** 工具栏等界面元素的「有背景图」判断, 供毛玻璃样式使用。 */
 const hasReaderBackground = computed(() => shellPaintsBackground.value)
 /** 浮层底板是否半透明(用户调低了「面板不透明度」)。半透明时才上毛玻璃:
  *  实色底板再叠 blur 只是白耗 GPU, 而模糊层在实色下也完全看不出来。 */
 const hasTranslucentPanel = computed(() => store.config.panelOpacity < 1)
-const readerColorScheme = computed(() => store.isNight || theme.value.name === '暗灰' ? 'dark' : 'light')
+const readerColorScheme = computed(() => {
+  if (appStore.miniMode) return theme.value.name === '迷你浅色' ? 'light' : 'dark'
+  return store.isNight || theme.value.name === '暗灰' ? 'dark' : 'light'
+})
 
 const scrollContainerRef = ref<HTMLElement>()
 const chapterTextRef = ref<HTMLElement>()
@@ -2559,6 +2586,8 @@ const {
   startAutoScroll,
   stopAutoScroll,
   pauseAutoScrollForManualInput,
+  holdAutoScroll,
+  releaseAutoScroll,
   startSpeech,
   speechPrev,
   speechNext,
@@ -2584,7 +2613,156 @@ const {
  *  补间每帧直接写 scrollTop, 不中断会与用户自己的滚动互相抢位置。 */
 function handleManualReadingInput() {
   cancelPageScrollAnimation(scrollContainerRef.value)
-  pauseAutoScrollForManualInput()
+  pauseAutoScrollForManualInput(appStore.miniMode ? MINI_AUTO_SCROLL_RESUME_MS : undefined)
+}
+
+/* ─── 迷你模式(移植自 reader_mac 的悬浮阅读器) ───
+ *  - 按住正文拖动即移动窗口; 移动不足阈值仍算一次点击, 点击翻页/呼出工具栏照旧。
+ *  - 右键弹出紧凑面板(字号、行距、文字/背景色、透明度), 打开期间停住自动滚动。
+ *  - 固定键位见 utils/miniReader 的 resolveMiniKeyAction; Esc 隐藏窗口, 从托盘图标唤回。 */
+const miniPanel = ref({ visible: false, x: 0, y: 0 })
+const miniSpeedHint = ref('')
+let miniSpeedHintTimer: number | null = null
+let miniDragStart: { x: number; y: number } | null = null
+/** 刚拖过窗口: 松手补发的那次 click 不能当成点击翻页/呼出工具栏。
+ *  不用时间窗: 拖窗是系统接管的模态过程, 拖多久都有可能。下次按下时复位。 */
+let suppressClickAfterMiniDrag = false
+
+function handleScrollContainerMouseDown(e: MouseEvent) {
+  handleManualReadingInput()
+  suppressClickAfterMiniDrag = false
+  if (!appStore.miniMode || e.button !== 0 || !isTauriRuntime()) return
+  if (isReaderInteractiveClickTarget(e.target as HTMLElement | null)) return
+  miniDragStart = { x: e.clientX, y: e.clientY }
+  window.addEventListener('mousemove', handleMiniDragMove)
+  window.addEventListener('mouseup', endMiniDragTracking)
+}
+
+function handleMiniDragMove(e: MouseEvent) {
+  if (!miniDragStart) return
+  if (!exceedsMiniDragThreshold(e.clientX - miniDragStart.x, e.clientY - miniDragStart.y)) return
+  endMiniDragTracking()
+  suppressClickAfterMiniDrag = true
+  closeMiniPanel()
+  void import('@tauri-apps/api/window')
+    .then(({ getCurrentWindow }) => getCurrentWindow().startDragging())
+    .catch(() => undefined)
+}
+
+function endMiniDragTracking() {
+  miniDragStart = null
+  window.removeEventListener('mousemove', handleMiniDragMove)
+  window.removeEventListener('mouseup', endMiniDragTracking)
+}
+
+function openMiniPanel(event: MouseEvent) {
+  closeReaderContextMenu()
+  if (showControls.value) collapseControlsByClick()
+  miniPanel.value = { visible: true, x: event.clientX, y: event.clientY }
+  holdAutoScroll()
+}
+
+function closeMiniPanel() {
+  if (!miniPanel.value.visible) return
+  miniPanel.value.visible = false
+  releaseAutoScroll()
+}
+
+function openPanelFromMini(panel: 'bookshelf' | 'catalog') {
+  closeMiniPanel()
+  store.openPanel(panel)
+}
+
+function toggleAutoScrollFromMini() {
+  store.isAutoScrolling = !store.isAutoScrolling
+  closeMiniPanel()
+}
+
+async function exitMiniFromPanel() {
+  closeMiniPanel()
+  try {
+    await appStore.toggleMiniMode()
+  } catch (error) {
+    appStore.showToast((error as Error).message || '切换迷你模式失败', 'error')
+  }
+}
+
+/** Esc / 面板里的「隐藏窗口」: 停止自动滚动、先落盘进度, 再隐藏整个窗口。 */
+async function hideMiniWindow() {
+  closeMiniPanel()
+  store.isAutoScrolling = false
+  persistReadingProgressTemporaryKeepalive()
+  if (!isTauriRuntime()) return
+  try {
+    const { getCurrentWindow } = await import('@tauri-apps/api/window')
+    await getCurrentWindow().hide()
+  } catch {
+    // 隐藏失败时窗口仍在原处, 不需要额外处理。
+  }
+}
+
+// 退出迷你模式时面板随之失效, 必须收起并放开被它停住的自动滚动。
+watch(() => appStore.miniMode, (mini) => {
+  if (!mini) closeMiniPanel()
+})
+
+function showMiniSpeedHint(speed: number) {
+  miniSpeedHint.value = `自动滚动 ${speed} px/秒`
+  if (miniSpeedHintTimer) clearTimeout(miniSpeedHintTimer)
+  miniSpeedHintTimer = window.setTimeout(() => {
+    miniSpeedHint.value = ''
+    miniSpeedHintTimer = null
+  }, 1200)
+}
+
+/** 迷你模式的固定键位。返回 true 表示已处理; 其余按键继续走常规快捷键。 */
+function handleMiniKeydown(e: KeyboardEvent): boolean {
+  const action = resolveMiniKeyAction(e, store.isAutoScrolling)
+  if (!action) return false
+  if (action === 'hideWindow') {
+    // Esc 先逐层关掉浮层, 都没有时才隐藏窗口。
+    if (miniPanel.value.visible) closeMiniPanel()
+    else if (store.activePanel) store.closePanel()
+    else if (showControls.value) collapseControlsByClick()
+    else void hideMiniWindow()
+    return true
+  }
+  // 浮层打开时方向键和 / 留给浮层(目录列表等)。
+  if (miniPanel.value.visible || store.activePanel) return false
+  const container = scrollContainerRef.value
+  switch (action) {
+    case 'toggleAutoScroll':
+      store.isAutoScrolling = !store.isAutoScrolling
+      return true
+    case 'scrollUp':
+    case 'scrollDown': {
+      if (!container) return false
+      if (isHorizontalPageMode.value) {
+        if (action === 'scrollUp') pageBackward()
+        else pageForward()
+        return true
+      }
+      handleManualReadingInput()
+      const line = config.value.fontSize * config.value.lineHeight
+      container.scrollBy({ top: action === 'scrollUp' ? -line : line, behavior: 'instant' })
+      return true
+    }
+    case 'nextChapter':
+      void nextChapter()
+      return true
+    case 'prevChapter':
+      void prevChapter()
+      return true
+    case 'slowerAutoScroll':
+    case 'fasterAutoScroll': {
+      const speed = stepMiniAutoScrollSpeed(config.value.autoScrollSpeed, action === 'fasterAutoScroll' ? 1 : -1)
+      store.updateConfig('autoScrollSpeed', speed)
+      showMiniSpeedHint(speed)
+      return true
+    }
+    default:
+      return false
+  }
 }
 
 /** 翻页步长: 按正文行高取整, 翻页后视口顶部落在行首。
@@ -2610,6 +2788,10 @@ function handleBackgroundClick(e: Event) {
 
 function handleContextMenu(event: MouseEvent) {
   event.preventDefault()
+  if (appStore.miniMode) {
+    openMiniPanel(event)
+    return
+  }
   const text = window.getSelection?.()?.toString().trim() || ''
   const width = 190
   const height = 342
@@ -2633,6 +2815,12 @@ async function nextChapterFromContextMenu() {
 
 function closeReaderContextMenu() {
   readerContextMenu.value.visible = false
+}
+
+/** 点到正文之外(工具栏等)也收起右键菜单与迷你面板; 面板自身的点击已 stop。 */
+function closeReaderPopupsOnWindowClick() {
+  closeReaderContextMenu()
+  closeMiniPanel()
 }
 
 function searchContextSelection() {
@@ -2755,6 +2943,15 @@ async function refreshFromContextMenu() {
 function handleGlobalClick(e: MouseEvent) {
   if (store.activePanel) return
   closeReaderContextMenu()
+  if (suppressClickAfterMiniDrag) {
+    suppressClickAfterMiniDrag = false
+    return
+  }
+  // 迷你面板打开时, 点正文只负责关掉面板(并恢复自动滚动), 不翻页。
+  if (miniPanel.value.visible) {
+    closeMiniPanel()
+    return
+  }
   if (Date.now() < suppressNextTapUntil) return
   if (Date.now() < suppressSelectionCloseUntil.value) return
   if (selectionMenu.value.visible) {
@@ -3282,6 +3479,10 @@ function handleKeydown(e: KeyboardEvent) {
   // 用户在搜索框里按 Esc 会毫无反应(面板关不掉, 也退不出阅读页), 只能先用鼠标
   // 点一下正文。返回是"离开当前层"的通用语义, 与正在打字不冲突: 它不往输入框
   // 里插入字符, 也不改变光标位置。
+  if (appStore.miniMode && !isKeyboardHotkeyBlocked() && !isHotkeyCaptureActive() && handleMiniKeydown(e)) {
+    e.preventDefault()
+    return
+  }
   const action = resolveHotkeyAction(store.hotkeyBindings, keyId, readingModeKind.value)
   if (action !== 'back' && isKeyboardHotkeyBlocked()) return
 
@@ -3600,7 +3801,7 @@ onMounted(async () => {
   window.addEventListener('mousedown', handleReaderMouseDown, true)
   window.addEventListener('auxclick', handleReaderAuxClick, true)
   window.addEventListener('mouseup', handleReaderMouseUpForHotkey, true)
-  window.addEventListener('click', closeReaderContextMenu)
+  window.addEventListener('click', closeReaderPopupsOnWindowClick)
   // 书源图片气泡的 click 脚本(捕获阶段, 抢在翻页逻辑之前)
   document.addEventListener('click', handleSourceImageClick, true)
   document.addEventListener('mouseup', handleMouseUpSelection)
@@ -3667,7 +3868,9 @@ onUnmounted(() => {
   window.removeEventListener('mousedown', handleReaderMouseDown, true)
   window.removeEventListener('auxclick', handleReaderAuxClick, true)
   window.removeEventListener('mouseup', handleReaderMouseUpForHotkey, true)
-  window.removeEventListener('click', closeReaderContextMenu)
+  window.removeEventListener('click', closeReaderPopupsOnWindowClick)
+  endMiniDragTracking()
+  if (miniSpeedHintTimer) clearTimeout(miniSpeedHintTimer)
   document.removeEventListener('click', handleSourceImageClick, true)
   document.removeEventListener('mouseup', handleMouseUpSelection)
   document.removeEventListener('touchend', handleTouchEndSelection)
@@ -3959,6 +4162,28 @@ watch(
 .reader-view.disable-system-callout .horizontal-page-content,
 .reader-view.disable-system-callout .continuous-reading {
   -webkit-touch-callout: none;
+}
+
+/* 迷你模式按住正文即拖动窗口(同 reader_mac), 选字会和拖动抢同一个手势, 因此关掉选择。 */
+.reader-view.mini-reader .reader-scroll-container,
+.reader-view.mini-reader .reader-scroll-container :is(.chapter-text, .horizontal-page-content),
+.reader-view.mini-reader :deep(.chapter-text p) {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.mini-speed-hint {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  z-index: 40;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  font-size: 11px;
+  line-height: 1.3;
+  pointer-events: none;
 }
 
 .auto-reading-status {

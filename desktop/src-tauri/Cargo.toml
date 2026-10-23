@@ -13,7 +13,7 @@ reader-rust = { path = "../.." }
 # `custom-protocol` embeds the frontendDist assets into the binary and makes
 # WebviewUrl::App load them; without it the app tries the devUrl (localhost:5173)
 # even in release builds.
-tauri = { version = "2", features = ["custom-protocol", "tray-icon"] }
+tauri = { version = "2", features = ["custom-protocol", "tray-icon", "macos-private-api"] }
 tauri-plugin-single-instance = "2"
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }

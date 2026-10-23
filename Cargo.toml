@@ -72,6 +72,18 @@ pdf-extract = "0.12.0"
 # 现在也承载进程内的 HTTP 服务, 因此提升为正式依赖。
 axum = { version = "0.7", features = ["json", "multipart"] }
 
+# 迷你模式的屏幕吸管(NSColorSampler), 见 api/commands/window.rs。
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "objc2-core-foundation",
+    "NSColor",
+    "NSColorSampler",
+    "NSColorSpace",
+] }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 winreg = "0.55"
 

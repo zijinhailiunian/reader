@@ -183,6 +183,7 @@ pub fn invoke_handler() -> impl Fn(Invoke<tauri::Wry>) -> bool + Send + Sync + '
         commands::window::configure_boss_key,
         commands::window::get_window_mode,
         commands::window::toggle_mini_mode,
+        commands::window::sample_screen_color,
         commands::window::acknowledge_close_request,
         // Web 阅读模式的开关与状态。放在库侧注册, 因为桌面壳无法往
         // `generate_handler!` 的闭包里追加命令。

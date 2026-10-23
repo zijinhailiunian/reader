@@ -31,6 +31,15 @@ import {
 } from '../utils/readerBackground'
 import { normalizeReaderColor } from '../utils/readerColor'
 import {
+  DEFAULT_MINI_BACKGROUND_COLOR,
+  DEFAULT_MINI_BACKGROUND_OPACITY,
+  DEFAULT_MINI_TEXT_COLOR,
+  isLightMiniBackground,
+  miniBackgroundFill,
+  normalizeMiniColor,
+  normalizeMiniOpacity,
+} from '../utils/miniReader'
+import {
   HOTKEY_ACTION_MAP,
   bindActionToKey,
   isDefaultHotkeyBindings,
@@ -142,6 +151,10 @@ export interface ReadConfig {
   /** 阅读页浮层（目录/书签/设置抽屉、右键菜单等）的底板不透明度, 1 为实色。
    *  阅读页铺了背景图时, 半透明底板能让用户边调设置边看到正文变化。 */
   panelOpacity: number
+  /** 迷你模式专用外观(见 utils/miniReader): 文字色、背景色、背景透明度。 */
+  miniTextColor: string
+  miniBackgroundColor: string
+  miniBackgroundOpacity: number
 }
 
 const defaultConfig: ReadConfig = {
@@ -171,6 +184,9 @@ const defaultConfig: ReadConfig = {
   readerBackgroundImage: '',
   readerImageOpacity: DEFAULT_READER_BACKGROUND_OPACITY,
   panelOpacity: DEFAULT_READER_PANEL_OPACITY,
+  miniTextColor: DEFAULT_MINI_TEXT_COLOR,
+  miniBackgroundColor: DEFAULT_MINI_BACKGROUND_COLOR,
+  miniBackgroundOpacity: DEFAULT_MINI_BACKGROUND_OPACITY,
 }
 
 function loadConfig(): ReadConfig {
@@ -238,6 +254,9 @@ function loadConfig(): ReadConfig {
           || (typeof savedConfig.readerBackgroundImage === 'string' ? savedConfig.readerBackgroundImage : ''),
         readerImageOpacity: normalizeReaderBackgroundOpacity(savedConfig.readerImageOpacity),
         panelOpacity: normalizeReaderPanelOpacity(savedConfig.panelOpacity),
+        miniTextColor: normalizeMiniColor(savedConfig.miniTextColor, DEFAULT_MINI_TEXT_COLOR),
+        miniBackgroundColor: normalizeMiniColor(savedConfig.miniBackgroundColor, DEFAULT_MINI_BACKGROUND_COLOR),
+        miniBackgroundOpacity: normalizeMiniOpacity(savedConfig.miniBackgroundOpacity),
       }
     }
   } catch { /* ignore */ }
@@ -842,6 +861,9 @@ export const useReaderStore = defineStore('reader', () => {
       readerImageOpacity: config.readerImageOpacity,
       panelOpacity: config.panelOpacity,
       fontColor: config.fontColor,
+      miniTextColor: config.miniTextColor,
+      miniBackgroundColor: config.miniBackgroundColor,
+      miniBackgroundOpacity: config.miniBackgroundOpacity,
     }
     Object.assign(config, defaultConfig)
     Object.assign(config, backgroundPreferences)
@@ -986,6 +1008,7 @@ export const useReaderStore = defineStore('reader', () => {
   /** 阅读页实际使用的配色: 自定义色覆盖主题预设的同名字段。
    *  只覆盖阅读页, 弹层等界面仍走 chromeTheme 的主题色。 */
   const readerTheme = computed<ThemePreset>(() => {
+    if (appStore.miniMode) return miniTheme.value
     const activeTheme = currentTheme.value
     const backgroundColor = normalizeReaderColor(config.readerBackgroundColor)
     const color = normalizeReaderColor(config.fontColor)
@@ -999,6 +1022,19 @@ export const useReaderStore = defineStore('reader', () => {
       // popup, 设了自定义阅读背景色之后, 呼出工具栏会在正文底色上方贴一条
       // 预设色的栏, 两截颜色对不上。(与 backgroundColor 同色, 拼成连续一条。)
       popup: backgroundColor || activeTheme.popup,
+    }
+  })
+  /** 迷你模式的阅读配色。body/content 带透明度(透明窗口才能透出桌面),
+   *  popup 用实色 —— 它是小窗工具栏的底, 半透明会让按钮压在桌面内容上看不清。 */
+  const miniTheme = computed<ThemePreset>(() => {
+    const opacity = appStore.supportsTransparentWindow ? config.miniBackgroundOpacity : 1
+    const fill = miniBackgroundFill(config.miniBackgroundColor, opacity)
+    return {
+      name: isLightMiniBackground(config.miniBackgroundColor) ? '迷你浅色' : '迷你深色',
+      body: fill,
+      content: fill,
+      fontColor: normalizeMiniColor(config.miniTextColor, DEFAULT_MINI_TEXT_COLOR),
+      popup: normalizeMiniColor(config.miniBackgroundColor, DEFAULT_MINI_BACKGROUND_COLOR),
     }
   })
   /** 阅读页背景色(已归一化)。空串表示跟随主题 / 让位给桌面背景图。 */

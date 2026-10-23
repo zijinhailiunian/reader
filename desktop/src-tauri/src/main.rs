@@ -176,6 +176,16 @@ fn main() {
                 persist_window_state(app_handle, &window, true);
             }
         }
+        // macOS: 迷你模式按 Esc 会隐藏窗口, 点 Dock 图标应能把它唤回来
+        // (菜单栏托盘图标是另一个入口)。
+        #[cfg(target_os = "macos")]
+        if let tauri::RunEvent::Reopen { .. } = event {
+            if let Some(window) = app_handle.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }
     });
 }
 
@@ -267,6 +277,11 @@ fn start(app: &mut App, paths: &portable::Paths) -> anyhow::Result<()> {
     // 那边本来就按 identifier 分开, 不需要改。
     #[cfg(target_os = "windows")]
     let window = window.data_directory(paths.webview_data.clone());
+    // macOS 建透明窗口: 迷你模式的阅读页可以按设置的背景透明度透出桌面
+    // (同 reader_mac 的悬浮窗)。常规页面都自己铺实色底, 看不出差别。
+    // 只开 macOS —— Windows 上的 WebView2 透明窗口另有缩放闪烁等问题, 未验证。
+    #[cfg(target_os = "macos")]
+    let window = window.transparent(true);
     let window = window
         .center()
         // 先不显示。Tauri 默认为 visible(true), 于是窗口在 WebView2 尚未渲染出

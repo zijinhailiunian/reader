@@ -569,6 +569,13 @@ export const useAppStore = defineStore('app', () => {
   // 状态以 Rust 侧 window-state.json 为准(桌面壳启动时要据此决定建窗尺寸),
   // 前端只镜像一份驱动紧凑布局, 因此不写 localStorage。
   const miniMode = ref(false)
+  /** 运行在 macOS 桌面壳里。 */
+  const isMacDesktop = isTauriRuntime()
+    && typeof navigator !== 'undefined'
+    && /Macintosh|Mac OS X/i.test(navigator.userAgent)
+  /** 窗口能否透出桌面。只有 macOS 桌面壳建的是透明窗口(见 desktop main.rs);
+   *  其它平台窗口底色不透明, 迷你外观的背景透明度在那里只会把底色调灰, 因此不开放。 */
+  const supportsTransparentWindow = isMacDesktop
 
   async function syncWindowMode() {
     if (!isTauriRuntime()) return
@@ -617,7 +624,7 @@ export const useAppStore = defineStore('app', () => {
 
   return {
     theme, setTheme, toggleTheme,
-    miniMode, syncWindowMode, toggleMiniMode,
+    miniMode, isMacDesktop, supportsTransparentWindow, syncWindowMode, toggleMiniMode,
     closeToTray, setCloseToTray, toggleCloseToTray,
     legadoWebdavConfig, setLegadoWebdavConfig, legadoSyncEnabled, setLegadoSyncEnabled,
     bossKeyEnabled, bossKeyShortcut, applyBossKey, setBossKeyEnabled, setBossKeyShortcut,

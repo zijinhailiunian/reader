@@ -151,6 +151,62 @@ pub fn toggle_mini_mode(app: tauri::AppHandle) -> Result<WindowMode, String> {
     })
 }
 
+/// 迷你模式的屏幕吸管: 进入系统取色状态(放大镜), 返回所取颜色的 `#rrggbb`;
+/// 用户按 Esc 取消时返回 `None`。与 reader_mac 一样用 `NSColorSampler`,
+/// 不打开完整的颜色面板。WKWebView 里的 `<input type="color">` 点了没有反应,
+/// 所以 macOS 上取色只能走这里; 其它平台前端仍用网页取色控件。
+#[tauri::command]
+pub async fn sample_screen_color(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        app.run_on_main_thread(move || color_sampler::begin(sender))
+            .map_err(|error| error.to_string())?;
+        receiver.await.map_err(|_| "取色已中断".to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        Err("屏幕取色仅支持 macOS".to_string())
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod color_sampler {
+    use std::sync::Mutex;
+
+    use block2::RcBlock;
+    use objc2_app_kit::{NSColor, NSColorSampler, NSColorSpace};
+    use tokio::sync::oneshot::Sender;
+
+    /// 必须在主线程调用。选择回调也由系统在主线程上调用, 且只会调用一次。
+    pub fn begin(sender: Sender<Option<String>>) {
+        let sender = Mutex::new(Some(sender));
+        let handler = RcBlock::new(move |color: *mut NSColor| {
+            // SAFETY: 系统传入的是有效的 NSColor 或空指针(用户取消)。
+            let hex = unsafe { color.as_ref() }.and_then(to_hex);
+            if let Some(sender) = sender.lock().ok().and_then(|mut slot| slot.take()) {
+                let _ = sender.send(hex);
+            }
+        });
+        let sampler = NSColorSampler::new();
+        // SAFETY: 在主线程调用; sampler 在取色会话结束前由系统持有。
+        unsafe { sampler.showSamplerWithSelectionHandler(&handler) };
+    }
+
+    /// 转成不透明的 sRGB `#rrggbb`(文字和背景颜色都不带透明度)。
+    fn to_hex(color: &NSColor) -> Option<String> {
+        let srgb = color.colorUsingColorSpace(&NSColorSpace::sRGBColorSpace())?;
+        let channel = |value: f64| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+        Some(format!(
+            "#{:02x}{:02x}{:02x}",
+            channel(srgb.redComponent()),
+            channel(srgb.greenComponent()),
+            channel(srgb.blueComponent()),
+        ))
+    }
+}
+
 #[tauri::command]
 pub fn configure_boss_key(
     app: tauri::AppHandle,

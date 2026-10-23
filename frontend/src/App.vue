@@ -4,6 +4,7 @@
     :class="{
       'has-custom-background': showCustomBackground,
       'mini-mode': appStore.miniMode,
+      'mini-reader-shell': miniReaderShell,
     }"
     :style="appShellStyle"
   >
@@ -16,7 +17,9 @@
     <!-- 标题栏只在桌面端渲染: 它整套是为无边框窗口服务的(拖动区、最小化/
          最大化/关闭、迷你模式)。浏览器里没有窗口可控制, 留着只会显示三个
          点了没反应的按钮, 还白占 30px 顶部空间。 -->
-    <TitleBar v-if="!appStore.isWebMode" :surface="titlebarSurface" />
+    <!-- 迷你模式的阅读页像 reader_mac 的浮窗一样不留标题栏: 按住正文拖动窗口,
+         退出迷你模式、隐藏窗口都在右键面板里。 -->
+    <TitleBar v-if="!appStore.isWebMode && !miniReaderShell" :surface="titlebarSurface" />
     <div class="app-body">
       <AppTopBar v-if="showHeader" />
       <main class="app-main" :class="{ 'with-bottom-nav': showBottomNav, 'without-header': !showHeader }">
@@ -84,7 +87,9 @@ const titlebarSurface = computed<'settings' | 'reader-panel' | null>(() => {
   if (route.name === 'reader' && readerStore.activePanel) return 'reader-panel'
   return null
 })
-const showCustomBackground = computed(() => Boolean(shellBackgroundImage.value))
+/** 迷你模式下的阅读页: 外观由迷你设置接管(可透出桌面), 外壳不铺任何底色和背景图。 */
+const miniReaderShell = computed(() => appStore.miniMode && route.name === 'reader')
+const showCustomBackground = computed(() => !miniReaderShell.value && Boolean(shellBackgroundImage.value))
 const shellBackgroundImage = computed(() => {
   const onReader = route.name === 'reader'
   // 不按页面清空参数: 由 resolveShellBackgroundImage 自己按 onReader 分流。
@@ -98,7 +103,9 @@ const shellBackgroundImage = computed(() => {
   }, onReader)
 })
 const appShellStyle = computed(() => ({
-  background: route.name === 'reader'
+  background: miniReaderShell.value
+    ? 'transparent'
+    : route.name === 'reader'
     ? readerStore.readerTheme.body
     : 'var(--color-bg)',
 }))
@@ -120,6 +127,12 @@ const customBackgroundStyle = computed(() => {
 const stopBackgroundClassSync = watch(showCustomBackground, (active) => {
   if (typeof document === 'undefined') return
   document.body.classList.toggle('custom-background-active', active)
+}, { immediate: true })
+
+// html/body/#app 的底色在全局样式里, 透明窗口要透出桌面必须把它们也清掉。
+const stopMiniShellClassSync = watch(miniReaderShell, (active) => {
+  if (typeof document === 'undefined') return
+  document.documentElement.classList.toggle('mini-reader-transparent', active)
 }, { immediate: true })
 
 onMounted(() => {
@@ -211,6 +224,7 @@ onBeforeUnmount(() => {
   closeUnlisten?.()
   legadoUnlisten?.()
   stopBackgroundClassSync()
+  stopMiniShellClassSync()
   if (typeof document !== 'undefined') {
     document.body.classList.remove('custom-background-active')
   }
@@ -441,6 +455,20 @@ body.custom-background-active .detail-modal :is(.tag, .action-btn:not(.primary))
    showBottomNav 控制不渲染, 这里只收掉标题栏里的应用名, 留出拖动区域。 */
 .app-shell.mini-mode > .titlebar .titlebar-title {
   display: none;
+}
+
+/* 迷你模式阅读页: 透明窗口(仅 macOS 桌面壳)透出桌面, 圆角裁掉四角。
+   没有标题栏, 依赖 --titlebar-height 的浮层(目录抽屉等)从顶端开始。 */
+html.mini-reader-transparent,
+html.mini-reader-transparent body,
+html.mini-reader-transparent #app {
+  --titlebar-height: 0px;
+  background: transparent !important;
+}
+
+.app-shell.mini-reader-shell {
+  border-radius: 8px;
+  overflow: hidden;
 }
 
 /* Teleported dialogs live outside .app-shell. Keep their fixed viewport below
