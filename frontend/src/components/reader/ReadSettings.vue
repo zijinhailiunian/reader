@@ -12,13 +12,10 @@
     <div class="settings-header">
       <h3 class="settings-title">阅读设置</h3>
       <button
-        v-if="!standalone"
         class="reset-btn"
         title="重置排版参数；阅读配色与背景图会保留"
         @click="store.resetConfig()"
       >重置为默认</button>
-      <!-- 独立模式从主设置抽屉打开, 需要一个自己的关闭入口。 -->
-      <button v-else class="reset-btn" @click="emit('close')">关闭</button>
     </div>
 
     <nav class="reader-settings-tabs" aria-label="阅读设置分类">
@@ -1435,23 +1432,14 @@ const readerSettingsTabs = [
 ] as const
 
 /**
- * 独立模式：从主设置抽屉打开「朗读与听书」时用。
- *
- * 此时没有阅读上下文, 只保留「朗读」页签 —— 「显示/翻页」调的是阅读页排版(没有
- * 预览就没有意义), 「更多」里的离线缓存与净化入口又依赖阅读面板栈。这样主设置
- * 与阅读页用的是同一份实现, 不会出现两套配置界面各自漂移。
+ * 阅读设置面板。只在阅读页里用（`store.openPanel('settings')`），没有独立模式 ——
+ * 主设置抽屉里曾经复用这个组件显示「朗读与听书」，那个页签已移除：朗读参数与
+ * 阅读页排版本来就是同一套上下文（要能边调边看正文），拆到主设置里反而会多出
+ * 一份「没有预览的配置界面」。面板的开合由外层 `reader-drawer` 统一管，这里不提供
+ * 自己的关闭入口。
  */
-const props = withDefaults(defineProps<{ standalone?: boolean }>(), { standalone: false })
-const emit = defineEmits<{ close: [] }>()
-
-const visibleTabs = computed(() =>
-  props.standalone
-    ? readerSettingsTabs.filter((tab) => tab.value === 'speech')
-    : readerSettingsTabs,
-)
-const activeSettingsTab = ref<(typeof readerSettingsTabs)[number]['value']>(
-  props.standalone ? 'speech' : 'display',
-)
+const visibleTabs = computed(() => readerSettingsTabs)
+const activeSettingsTab = ref<(typeof readerSettingsTabs)[number]['value']>('display')
 const activeCustomFont = computed(() => {
   if (!config.value.fontFamily.startsWith('custom:')) return null
   const id = config.value.fontFamily.slice('custom:'.length)

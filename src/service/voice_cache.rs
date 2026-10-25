@@ -64,14 +64,6 @@ impl VoiceCache {
         let (fetched_at, voices) = guard.as_ref()?;
         is_fresh(*fetched_at, now).then(|| voices.clone())
     }
-
-    #[cfg(test)]
-    fn store_at(&self, fetched_at: Instant, voices: Vec<Value>) {
-        *self
-            .slot()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((fetched_at, voices));
-    }
 }
 
 /// 缓存是否还在有效期内。单独提出来是为了单测能注入时间点。
@@ -85,12 +77,21 @@ mod tests {
 
     #[test]
     fn ttl_boundary() {
-        let now = Instant::now();
-        assert!(is_fresh(now, now), "刚拉到的必然是新鲜的");
-        assert!(is_fresh(now - (VOICE_CACHE_TTL - Duration::from_secs(1)), now));
+        // 只做**向前**的时间算术：`Instant - Duration` 在机器开机时长小于 Duration 时
+        // 会 underflow 直接 panic（Windows 的 Instant 基于开机以来的计数，刚重启的机器
+        // 与 CI runner 上必现），所以这里把"现在"往前推，而不是把 `fetched_at` 往回调。
+        let fetched_at = Instant::now();
+        assert!(is_fresh(fetched_at, fetched_at), "刚拉到的必然是新鲜的");
+        assert!(is_fresh(
+            fetched_at,
+            fetched_at + (VOICE_CACHE_TTL - Duration::from_secs(1))
+        ));
         // 到点即过期：等于 TTL 也算过期，否则「一天」会变成「一天零一点」。
-        assert!(!is_fresh(now - VOICE_CACHE_TTL, now));
-        assert!(!is_fresh(now - (VOICE_CACHE_TTL + Duration::from_secs(1)), now));
+        assert!(!is_fresh(fetched_at, fetched_at + VOICE_CACHE_TTL));
+        assert!(!is_fresh(
+            fetched_at,
+            fetched_at + (VOICE_CACHE_TTL + Duration::from_secs(1))
+        ));
     }
 
     #[test]
@@ -109,9 +110,10 @@ mod tests {
         assert_eq!(cache.fresh(), Some(voices.clone()));
         assert_eq!(cache.any(), Some(voices.clone()));
 
-        // 手动把时间戳推到 TTL 之外：`fresh` 不再给值，但 `any` 仍能兜底。
-        cache.store_at(Instant::now() - VOICE_CACHE_TTL, voices.clone());
-        assert!(cache.fresh().is_none());
+        // 手动把"现在"推到 TTL 之外：`fresh` 不再给值，但 `any` 仍能兜底。
+        // 同样只做向前算术（见 `ttl_boundary`），`fresh_at` 就是为此预留的注入口。
+        let later = Instant::now() + VOICE_CACHE_TTL;
+        assert!(cache.fresh_at(later).is_none());
         assert_eq!(cache.any(), Some(voices));
     }
 }

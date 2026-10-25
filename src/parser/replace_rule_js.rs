@@ -43,7 +43,7 @@ const JS_MAX_STACK_SIZE: usize = 1024 * 1024;
 /// `'x'.repeat(1e9)` 这类脚本尽快失败，而不是把进程拖到 OOM。
 const JS_MEMORY_LIMIT: usize = 64 * 1024 * 1024;
 
-/// 游戏规则的默认执行上限：正常整章处理在毫秒级，超过这个量级基本可以判定是死循环。
+/// 净化脚本的默认执行上限：正常整章处理在毫秒级，超过这个量级基本可以判定是死循环。
 pub const DEFAULT_SCRIPT_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// 一条待执行的规则。`pattern` / `flags` 已由前端从 Java 正则降级为 JS 正则。

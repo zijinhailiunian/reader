@@ -1,5 +1,6 @@
 use scraper::{ElementRef, Html, Selector};
 use std::collections::HashSet;
+use std::sync::OnceLock;
 
 use crate::parser::rule_analyzer::split_top_level;
 
@@ -35,7 +36,121 @@ struct ParsedSelector {
 }
 
 pub fn parse_document(html: &str) -> Html {
-    Html::parse_document(html)
+    // 片段兜底: HTML5 解析器会丢弃「没有表格/列表上下文」的孤立标签 ——
+    // `<tr><td>…` / `<td>…` / `<li>…` 直接交给 `parse_document` 后这些元素
+    // 全都不在树里(内部内容会被提到 body 下), 元素级 `select('td a')` /
+    // `select('tr')` 因此恒为空。书源脚本把元素 innerHtml 交给宿主选择器引擎
+    // 时正是这种形态(元素列表规则交回表格行), 这里按首个标签补上祖先上下文。
+    match wrap_bare_fragment(html) {
+        Some(wrapped) => Html::parse_document(&wrapped),
+        None => Html::parse_document(html),
+    }
+}
+
+/// `parse_document` 为裸片段补上下文时打在祖先上的标记属性。
+const FRAGMENT_WRAP_ATTR: &str = "data-reader-fragment-wrap";
+/// 补上去的祖先容器数量(具体标签见 [`wrap_bare_fragment`])。
+const FRAGMENT_WRAP_DEPTH: usize = 3;
+
+/// `parse_document` 解析出的 body 的**原始顶层元素**。
+///
+/// 普通文档就是 `body > *`; 裸片段补过上下文时, 要跳过补上的 `table`/`tbody`/
+/// `tr` 这类祖先, 回到片段自己的那一层 —— 否则 `bookList` 交出一串 `<tr>` 时
+/// 只会看到一个 `table`。
+pub fn document_top_elements(doc: &Html) -> Vec<ElementRef<'_>> {
+    static BODY: OnceLock<Option<Selector>> = OnceLock::new();
+    let Some(selector) = BODY.get_or_init(|| Selector::parse("body").ok()).as_ref() else {
+        return Vec::new();
+    };
+    let Some(body) = doc.select(selector).next() else {
+        return Vec::new();
+    };
+    let mut current: Vec<ElementRef<'_>> = body.children().filter_map(ElementRef::wrap).collect();
+    for _ in 0..FRAGMENT_WRAP_DEPTH {
+        if !current
+            .iter()
+            .any(|el| el.value().attr(FRAGMENT_WRAP_ATTR).is_some())
+        {
+            break;
+        }
+        let mut next = Vec::new();
+        for el in current {
+            if el.value().attr(FRAGMENT_WRAP_ATTR).is_some() {
+                next.extend(el.children().filter_map(ElementRef::wrap));
+            } else {
+                next.push(el);
+            }
+        }
+        current = next;
+    }
+    current
+}
+
+/// 给裸片段补上 HTML5 要求的祖先上下文; 不需要补(或认不出首个标签)时返回 None。
+///
+/// 只处理「解析器会丢弃」的那几类标签, 其余片段保持原样由调用方处理 ——
+/// 过度包装会改变选择器语义(`div > p` 之类)。
+fn wrap_bare_fragment(fragment: &str) -> Option<String> {
+    let tag = first_tag_name(fragment)?;
+    // 完整文档不补(`<html>` / `<body>` 开头时首标签也不在这里)。
+    let (prefix, suffix): (&str, &str) = match tag.as_str() {
+        "tr" => (
+            "<table data-reader-fragment-wrap=\"tr\"><tbody>",
+            "</tbody></table>",
+        ),
+        "td" | "th" => (
+            "<table data-reader-fragment-wrap=\"cell\"><tbody><tr>",
+            "</tr></tbody></table>",
+        ),
+        "tbody" | "thead" | "tfoot" | "caption" | "colgroup" => {
+            ("<table data-reader-fragment-wrap=\"section\">", "</table>")
+        }
+        "col" => (
+            "<table data-reader-fragment-wrap=\"col\"><colgroup>",
+            "</colgroup></table>",
+        ),
+        "li" => ("<ul data-reader-fragment-wrap=\"li\">", "</ul>"),
+        "dt" | "dd" => ("<dl data-reader-fragment-wrap=\"dl\">", "</dl>"),
+        "option" | "optgroup" => (
+            "<select data-reader-fragment-wrap=\"option\">",
+            "</select>",
+        ),
+        "legend" => (
+            "<fieldset data-reader-fragment-wrap=\"legend\">",
+            "</fieldset>",
+        ),
+        _ => return None,
+    };
+    Some(format!("{prefix}{fragment}{suffix}"))
+}
+
+/// 片段里第一个开始标签的名字(小写); 跳过注释/doctype/空白。
+fn first_tag_name(fragment: &str) -> Option<String> {
+    let mut rest = fragment.trim_start();
+    loop {
+        if rest.is_empty() {
+            return None;
+        }
+        if let Some(tail) = rest.strip_prefix("<!--") {
+            let end = tail.find("-->")?;
+            rest = tail[end + 3..].trim_start();
+            continue;
+        }
+        if rest.starts_with("<!") || rest.starts_with("<?") {
+            let end = rest.find('>')?;
+            rest = rest[end + 1..].trim_start();
+            continue;
+        }
+        let tail = rest.strip_prefix('<')?;
+        let name: String = tail
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == ':')
+            .collect();
+        if name.is_empty() {
+            return None;
+        }
+        return Some(name.to_ascii_lowercase());
+    }
 }
 
 /// Convert Legado selector format to CSS selector

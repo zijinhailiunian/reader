@@ -9,9 +9,13 @@ pub enum AppError {
     BadRequest(String),
     #[error("internal error")]
     Internal(#[from] anyhow::Error),
-    #[error("db error")]
+    /// 数据库错误。**保留 sqlx 的原始描述**：早先这里只写 `db error`，于是
+    /// `{"isSuccess":false,"errorMsg":"db error"}` 把"哪个表/哪条语句/是锁还是
+    /// 约束"全部吞掉了，用户侧与 issue 里都只能看到一句无从下手的提示。
+    /// 对外仍是 500（`router::envelope` 按变体判状态码），只是多了原因。
+    #[error("db error: {0}")]
     Db(#[from] sqlx::Error),
-    #[error("http error")]
+    #[error("http error: {0}")]
     Http(#[from] reqwest::Error),
 }
 

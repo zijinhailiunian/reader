@@ -1041,7 +1041,90 @@ const JS_PRELUDE: &str = r#"(function (g) {
 
   // ── legado `AnalyzeRule`: 用规则解析当前页面内容 ──
   // 注意: legado 的 `isUrl` 参数(把结果转成绝对地址)暂未实现, 结果原样返回。
-  function wrapElement(snapshot) {
+
+  // ── HTML 小工具: 元素快照的可变操作 ──
+  // legado 的 `result` 是**真 JSoup Element**: 书源会对它 `clone()`、再
+  // `select('a,script,style').remove()` 后取 `html()`(正文清洗),
+  // 或者 `new org.jsoup.nodes.Element('div')` + `appendChild` 拼卡片(搜索结果)。
+  // 桌面端只有快照, 因此这里补一层等价的可变语义:
+  //   - 元素记得自己的"宿主元素"(`__owner`), `remove()` 从宿主 innerHtml 里摘掉
+  //     自己的 outerHtml, 并逐层向上重算 outerHtml/text;
+  //   - `clone()` 得到独立深拷贝(宿主为空), 对副本的删除不影响原文档。
+  function escapeHtmlText(text) {
+    return S(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+  function escapeHtmlAttr(text) {
+    return S(text).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+  var HTML_ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+  function decodeHtmlEntities(text) {
+    return S(text).replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z]+);/g, function (whole, body) {
+      if (body.charAt(0) === '#') {
+        var code = body.charAt(1) === 'x' || body.charAt(1) === 'X'
+          ? parseInt(body.slice(2), 16)
+          : parseInt(body.slice(1), 10);
+        return isNaN(code) ? whole : String.fromCharCode(code);
+      }
+      var named = HTML_ENTITIES[body.toLowerCase()];
+      return named === undefined ? whole : named;
+    });
+  }
+  // 快照 → 纯文本(JSoup `text()` 的归一化: 折叠空白)。
+  function htmlToText(html) {
+    return decodeHtmlEntities(
+      S(html)
+        .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ')
+        .replace(/<br\s*\/?>/gi, ' ')
+        .replace(/<\/(p|div|li|tr|h[1-6])>/gi, ' ')
+        .replace(/<[^>]*>/g, '')
+    ).replace(/\s+/g, ' ').replace(/^\s+|\s+$/g, '');
+  }
+  // 快照 → 自身 outerHtml(属性顺序按插入序, 与 JSoup 输出足够接近)。
+  function buildOuterHtml(tag, attrs, innerHtml) {
+    var name = S(tag) || 'div';
+    var head = '<' + name;
+    for (var key in attrs) {
+      if (!Object.prototype.hasOwnProperty.call(attrs, key)) continue;
+      var value = attrs[key];
+      head += ' ' + key + '="' + escapeHtmlAttr(value === null || value === undefined ? '' : value) + '"';
+    }
+    if (/^(br|hr|img|input|meta|link)$/i.test(name)) return head + '>';
+    return head + '>' + S(innerHtml) + '</' + name + '>';
+  }
+  // 重新计算快照的派生态(text/ownText/outerHtml), 并把变化同步给宿主元素。
+  function refreshSnapshot(el) {
+    var s = el.__snapshot;
+    s.outerHtml = buildOuterHtml(s.tag, s.attrs || {}, s.innerHtml);
+    s.text = htmlToText(s.innerHtml);
+    s.ownText = s.text;
+    var up = el.__owner;
+    if (!up) return;
+    var prev = el.__prevOuter;
+    var upSnap = up.__snapshot;
+    if (prev && prev !== s.outerHtml && S(upSnap.innerHtml).indexOf(prev) >= 0) {
+      upSnap.innerHtml = S(upSnap.innerHtml).split(prev).join(s.outerHtml);
+      el.__prevOuter = s.outerHtml;
+      refreshSnapshot(up);
+    } else {
+      el.__prevOuter = s.outerHtml;
+    }
+  }
+  // 深拷贝快照(用于 `clone()`), 丢掉宿主关系。
+  function cloneSnapshot(snapshot) {
+    var copy = {};
+    for (var key in snapshot) {
+      if (Object.prototype.hasOwnProperty.call(snapshot, key)) copy[key] = snapshot[key];
+    }
+    var attrs = {};
+    var source = snapshot.attrs || {};
+    for (var name in source) {
+      if (Object.prototype.hasOwnProperty.call(source, name)) attrs[name] = source[name];
+    }
+    copy.attrs = attrs;
+    return copy;
+  }
+
+  function wrapElement(snapshot, owner) {
     var s = snapshot || {};
     // JSONPath 结果(`java.getElements("$.list[*]")`)是**原始 JSON 对象**，不是元素
     // 快照。legado 的 `getElements` 在 `Mode.Json` 下走
@@ -1085,7 +1168,9 @@ const JS_PRELUDE: &str = r#"(function (g) {
       // (CSS 伪元素标题的站点普遍这么写)。
       text: function (value) {
         if (arguments.length && value !== undefined) {
-          s.text = S(value); s.ownText = S(value); return el;
+          s.text = S(value); s.ownText = S(value); s.innerHtml = escapeHtmlText(value);
+          refreshSnapshot(el);
+          return el;
         }
         return S(s.text);
       },
@@ -1097,18 +1182,29 @@ const JS_PRELUDE: &str = r#"(function (g) {
       },
       html: function (value) {
         if (arguments.length && value !== undefined) {
-          s.innerHtml = S(value); return el;
+          s.innerHtml = S(value);
+          refreshSnapshot(el);
+          return el;
         }
         return S(s.innerHtml);
       },
       outerHtml: function () { return S(s.outerHtml); },
       // JSoup `attr(key, value)` 同样是 setter, 返回元素自身。
       attr: function (name, value) {
-        if (arguments.length > 1) { attrs[S(name)] = S(value); return el; }
+        if (arguments.length > 1) {
+          attrs[S(name)] = S(value);
+          refreshSnapshot(el);
+          return el;
+        }
         var v = attrs[S(name)];
         return v === undefined ? '' : S(v);
       },
       hasAttr: function (name) { return Object.prototype.hasOwnProperty.call(attrs, S(name)); },
+      removeAttr: function (name) {
+        delete attrs[S(name)];
+        refreshSnapshot(el);
+        return el;
+      },
       tagName: function () { return S(s.tag); },
       // 在元素内部继续查询: 用 innerHtml 作为内容, 只匹配**后代**
       // (JSoup 的 element.select() 不含元素自身; 用 outerHtml 会把自己也选进来)
@@ -1117,27 +1213,80 @@ const JS_PRELUDE: &str = r#"(function (g) {
       // 等方法: 书源普遍写 `result.select('p.meta').first()`、
       // `.size()`、`.eachText()`。只返回普通数组会让这些调用抛 "not a function",
       // 字段取值全部落空(搜索结果为 0 条)。
+      //
+      // 子元素必须记住宿主(`__owner`): 正文规则的标准写法是
+      // `var c = box.clone(); c.select('a,script,style').remove(); c.html()`,
+      // 没有宿主关系时 `remove()` 无处生效, 去广告/去脚本就失效了。
       select: function (rule) {
         var inner = S(s.innerHtml);
         if (!inner) return elementsApi([]);
-        return elementsApi(wrapElements(g.__rule_get(S(rule), inner, 'elements')));
+        return elementsApi(wrapElements(g.__rule_get(S(rule), inner, 'elements'), el));
       },
+      children: function () {
+        return elementsApi(wrapElements(s.children === undefined ? '[]' : s.children, el));
+      },
+      // `clone()`: JSoup 返回独立副本(不挂在原文档上), 后续删除只影响副本。
+      clone: function () {
+        return wrapElement(cloneSnapshot(s), null);
+      },
+      // `remove()`: 从宿主 innerHtml 中摘掉自己, 并向上重算。
+      remove: function () {
+        var up = el.__owner;
+        if (!up) return el;
+        var outer = S(s.outerHtml);
+        var upSnap = up.__snapshot;
+        var inner = S(upSnap.innerHtml);
+        if (outer && inner.indexOf(outer) >= 0) {
+          upSnap.innerHtml = inner.split(outer).join('');
+          refreshSnapshot(up);
+        }
+        el.__owner = null;
+        return el;
+      },
+      // `appendChild(Element)`: 追加子元素/文本, 返回自身(JSoup 语义)。
+      appendChild: function (child) {
+        var piece = child && typeof child.outerHtml === 'function' ? child.outerHtml() : escapeHtmlText(child == null ? '' : child);
+        s.innerHtml = S(s.innerHtml) + piece;
+        refreshSnapshot(el);
+        return el;
+      },
+      // `empty()`: 清空子节点(部分源用它重置容器)。
+      empty: function () { s.innerHtml = ''; refreshSnapshot(el); return el; },
       toString: function () { return S(s.outerHtml); },
+      // 元素序列化时必须**直接交出快照**, 不能带一层包装。
+      //
+      // 脚本用普通数组攒列表(`var out = []; out.push(li); return out;`)时,
+      // 宿主拿到的是 `JSON.stringify(out)` 的结果 —— 没有 `toJSON` 的话每项会
+      // 变成 `{"__snapshot":{…},"__owner":null,"__prevOuter":"…"}`, 宿主既认不出
+      // 这是元素快照(缺顶层 `outerHtml`), 又会把 `__snapshot` 当普通 JSON 字段,
+      // 字段规则 `span.s2 a@text` 因此全部取空 —— 发现页/搜索页 0 条。
+      // 用 `Elements` 集合时靠 `elementsApi` 的 `toJSON` 兜住, 裸数组就只能靠这里。
+      toJSON: function () { return s; },
       // 保留原始快照: JSoup 桥需要在元素间复制/合并时重建包装对象。
-      __snapshot: s
+      __snapshot: s,
+      __owner: owner || null,
+      __prevOuter: S(s.outerHtml)
     };
+    // 内部字段必须**不可枚举**: `JSON.stringify` / `for..in` / `Object.assign`
+    // 只该看到元素本身的方法与外层快照, 否则会把宿主关系与快照副本一起序列化
+    // (上面 `toJSON` 之外的第二道保险: `toJSON` 缺失或被绕过时不至于串味)。
+    try {
+      Object.defineProperty(el, '__snapshot', { value: s, enumerable: false, writable: true, configurable: true });
+      Object.defineProperty(el, '__owner', { value: owner || null, enumerable: false, writable: true, configurable: true });
+      Object.defineProperty(el, '__prevOuter', { value: S(s.outerHtml), enumerable: false, writable: true, configurable: true });
+    } catch (_e) { /* 冻结对象保持原样 */ }
     return el;
   }
   // 宿主把"元素快照"注入为字段规则的 `result` 时要用同一套包装(见
   // `ELEMENT_BINDING_PREFIX`): legado 的 result 是 JSoup Element, 书源会对它
   // 调用 select()/html()/text()。桥接函数必须挂到全局, 宿主才能按名字调用。
   g.__wrapElement = wrapElement;
-  function wrapElements(json) {
+  function wrapElements(json, owner) {
     var list;
     try { list = JSON.parse(S(json)); } catch (e) { return []; }
     if (!list || typeof list.length !== 'number') return [];
     var out = [];
-    for (var i = 0; i < list.length; i++) out.push(wrapElement(list[i]));
+    for (var i = 0; i < list.length; i++) out.push(wrapElement(list[i], owner));
     return out;
   }
   // legado 的 `java.getElements` 返回 `Elements`(JSoup), 书源按 Java 方法调用:
@@ -1203,6 +1352,38 @@ const JS_PRELUDE: &str = r#"(function (g) {
         out.push(list[i] && list[i].outerHtml ? list[i].outerHtml() : '');
       }
       return out.join('');
+    });
+    // `Elements.add(el)` / `addAll(...)`: 书源用它拼搜索结果卡片列表
+    // (`var out = new org.jsoup.select.Elements(); out.add(mkCard(...))`)。
+    def('add', function (el) { list[list.length] = el; return list; });
+    def('addAll', function (other) {
+      var items = other && typeof other.length === 'number' ? other : arguments;
+      for (var i = 0; i < items.length; i++) list[list.length] = items[i];
+      return list;
+    });
+    // `Elements.remove()`: 逐个从宿主元素里摘掉(返回空集合语义的自身)。
+    def('remove', function () {
+      for (var i = list.length - 1; i >= 0; i--) {
+        if (list[i] && typeof list[i].remove === 'function') list[i].remove();
+      }
+      return list;
+    });
+    def('clone', function () {
+      var out = [];
+      for (var i = 0; i < list.length; i++) {
+        out.push(list[i] && typeof list[i].clone === 'function' ? list[i].clone() : list[i]);
+      }
+      return elementsApi(out);
+    });
+    def('eq', function (index) {
+      return list[index] === undefined ? elementsApi([]) : elementsApi([list[index]]);
+    });
+    def('parents', function () {
+      var out = [];
+      for (var i = 0; i < list.length; i++) {
+        if (list[i] && list[i].__owner) out.push(list[i].__owner);
+      }
+      return elementsApi(out);
     });
     return list;
   }
@@ -1510,12 +1691,14 @@ const JS_PRELUDE: &str = r#"(function (g) {
 
   /** 对每个元素分别 select，合并结果（JSoup Elements.select 语义）。 */
   function jsoupElementsFromElements(elements, rule) {
+    // 直接把子元素包装对象合并进集合: 走 JSON 快照重建会丢掉 `__owner`,
+    // 之后 `select('a,script').remove()` 就删不掉任何东西了(正文清洗会失效)。
     var out = [];
     for (var i = 0; i < elements.length; i++) {
       var sub = elements[i].select(rule);
       for (var j = 0; j < sub.length; j++) out.push(sub[j]);
     }
-    return jsoupElements(JSON.stringify(out.map(function (el) { return el.__snapshot; })));
+    return elementsApi(out);
   }
 
   /**
@@ -1674,13 +1857,89 @@ const JS_PRELUDE: &str = r#"(function (g) {
   // 后按裸名或 `Connection.Method.X` 传入 `method()`。
   var JsoupConnection = { Method: { GET: 'GET', POST: 'POST', HEAD: 'HEAD', PUT: 'PUT', PATCH: 'PATCH', DELETE: 'DELETE', OPTIONS: 'OPTIONS', TRACE: 'TRACE' } };
   tagJavaClassName(JsoupConnection, 'Connection');
+  // `new org.jsoup.select.Elements()` / `new org.jsoup.nodes.Element('div')`:
+  // 书源的 jsLib 常用它们**手工拼列表项**(造 div/h3/a/img/span 再 `out.add(...)`
+  // 交回宿主)。legado 靠 Rhino 的 Java 互操作构造真 Java 对象,
+  // 桌面端用可变的元素快照模拟:
+  //   - `Element(tag[, baseUri])` 造一个空元素, 支持 attr/text/html setter、
+  //     appendChild / prependElement / appendElement / remove / clone;
+  //   - `Elements()` 造空集合, 支持 add / addAll / first / get / size / select。
+  // 顶层 `Elements` 类缺失会让 jsLib 里的 `new org.jsoup.select.Elements()` 直接抛
+  // "cannot read property 'Elements' of undefined", 整个 bookList 脚本中断
+  // (搜索阶段报「书源解析失败」)。
+  function JsoupElementsClass() {
+    if (!(this instanceof JsoupElementsClass)) return new JsoupElementsClass();
+    return elementsApi([]);
+  }
+  function JsoupElementClass(tag, baseUri) {
+    if (!(this instanceof JsoupElementClass)) return new JsoupElementClass(tag, baseUri);
+    var name = S(tag) || 'div';
+    var snapshot = {
+      tag: name,
+      text: '',
+      ownText: '',
+      innerHtml: '',
+      outerHtml: '<' + name + '></' + name + '>',
+      attrs: {}
+    };
+    var el = wrapElement(snapshot, null);
+    if (baseUri !== undefined && baseUri !== null) {
+      try { el.__baseUri = S(baseUri); } catch (_e) {}
+    }
+    // `appendElement(tag)` 造子元素并追加, 返回**子元素**(JSoup 语义)。
+    el.appendElement = function (childTag) {
+      var child = new JsoupElementClass(childTag);
+      el.appendChild(child);
+      return child;
+    };
+    // `prependElement(tag)` 是它的前置版本; 快照只有字符串 innerHtml,
+    // 因此语义退化成"追加"(足够覆盖拼卡片场景)。
+    el.prependElement = el.appendElement;
+    el.prependChild = function (child) { return el.appendChild(child); };
+    // `children()` / `child(i)` 在快照层没有子节点索引, 返回空集合而不是抛错。
+    el.child = function () { return null; };
+    el.childNodeSize = function () { return 0; };
+    el.parent = function () { return el.__owner || null; };
+    el.baseUri = function () { return S(el.__baseUri || ''); };
+    el.className = function (value) {
+      if (arguments.length && value !== undefined) { return el.attr('class', value); }
+      return el.attr('class');
+    };
+    el.id = function (value) {
+      if (arguments.length && value !== undefined) { return el.attr('id', value); }
+      return el.attr('id');
+    };
+    return el;
+  }
+  // 给类打上名字: `JavaImporter(Packages.org.jsoup.select)` / 调试输出都靠它。
+  tagJavaClassName(JsoupElementsClass, 'Elements');
+  tagJavaClassName(JsoupElementClass, 'Element');
+
   g.org = {
     jsoup: {
       Jsoup: Jsoup,
       Connection: JsoupConnection,
-      Elements: function () { return jsoupElements('[]'); },
-      Element: function () { return null; },
-      Document: function () { return Jsoup.parse(''); }
+      Elements: JsoupElementsClass,
+      Element: JsoupElementClass,
+      Document: function () { return Jsoup.parse(''); },
+      // `org.jsoup.select.Elements` / `org.jsoup.nodes.Element` 的**真实包路径**:
+      // Rhino 里两者都在 jsoup 的子包下, 书源写的正是全名
+      // (`new org.jsoup.select.Elements()`、`new org.jsoup.nodes.Element('div')`)。
+      // 顶层同名别名保留给只写 `org.jsoup.Elements` 的老源。
+      select: { Elements: JsoupElementsClass },
+      nodes: {
+        Element: JsoupElementClass,
+        Document: function () { return Jsoup.parse(''); },
+        TextNode: function (text) {
+          // 文本节点: 只有 `text()`/`toString()`, appendChild 时按转义文本插入。
+          var value = S(text);
+          return {
+            text: function (v) { if (arguments.length && v !== undefined) { value = S(v); } return value; },
+            toString: function () { return value; },
+            outerHtml: function () { return escapeHtmlText(value); }
+          };
+        }
+      }
     }
   };
   // `Packages.org.jsoup.Jsoup` —— Rhino 里 `Packages.<pkg>.<Class>` 的取法。

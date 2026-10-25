@@ -866,12 +866,8 @@ impl RuleEngine {
         }
 
         let doc = html::parse_document(&output);
-        let sel = match scraper::Selector::parse("body > *") {
-            Ok(sel) => sel,
-            Err(_) => return vec![],
-        };
         let mut out = Vec::new();
-        for el in doc.select(&sel) {
+        for el in html::document_top_elements(&doc) {
             let name = rule
                 .name
                 .as_ref()
@@ -1024,13 +1020,9 @@ impl RuleEngine {
         }
 
         let doc = html::parse_document(&output);
-        let sel = match scraper::Selector::parse("body > *") {
-            Ok(sel) => sel,
-            Err(_) => return (vec![], vec![]),
-        };
         let mut out = Vec::new();
         let mut seen_urls = std::collections::HashSet::new();
-        for el in doc.select(&sel) {
+        for el in html::document_top_elements(&doc) {
             let title = rule
                 .chapter_name
                 .as_ref()
@@ -2263,12 +2255,9 @@ fn element_snapshot(element: &scraper::ElementRef) -> Value {
 fn snapshot_from_fragment(fragment: &str) -> Value {
     let fragment = fragment.trim();
     let doc = html::parse_document(fragment);
-    // 用 scraper 原生选择器取 body 下的第一个元素: 这里要的是"这个片段本身",
-    // 不该经过 legado 风格的选择器改写。
-    let first_element = scraper::Selector::parse("body > *")
-        .ok()
-        .and_then(|selector| doc.select(&selector).next());
-    if let Some(element) = first_element {
+    // 取片段自己的顶层元素(裸 `<tr>`/`<td>`/`<li>` 已被补上上下文, 这里回退到
+    // 片段那一层, 拿到的才是"这个片段本身")。
+    if let Some(element) = html::document_top_elements(&doc).into_iter().next() {
         return element_snapshot(&element);
     }
     json!({
@@ -2560,7 +2549,14 @@ fn eval_field_html_doc_with_ctx(
 
     let interpolated_rule = interpolate_common_templates(rule, &doc.html(), base_url, ctx);
     let had_templates = interpolated_rule != rule;
-    let (pure, js) = extract_js(&interpolated_rule);
+    // `##匹配##替换` 段必须在这里切开。
+    //
+    // 详情页字段走的是这个"整页"分支: 不切的话整条规则(含 `##作\s*者[：:]`)
+    // 会被当成一个 CSS 选择器交给解析器, 选不到任何元素, 字段直接为空。
+    // 症状就是「详情页有书名、作者和分类却都是空」—— 书源的
+    // `ruleBookInfo.author` / `kind` 常写成 `…@text##作\s*者[：:]\s*` 这种形态。
+    let (pure_rule, regex_part) = split_legado_regex(&interpolated_rule);
+    let (pure, js) = extract_js(&pure_rule);
     let mut text = if pure.is_empty() {
         // 纯 JS 规则: legado 里 `result` 就是**当前内容**(整页响应),
         // 脚本普遍写 `Packages.org.jsoup.Jsoup.parse(String(result))`
@@ -2576,9 +2572,12 @@ fn eval_field_html_doc_with_ctx(
 
     if let Some(script) = js {
         if let Ok(res) = eval_js(script, &text, base_url) {
-            return Some(res);
+            text = res;
         }
-        return Some(text);
+    }
+
+    if let Some(reg) = regex_part {
+        text = apply_legado_regex(&text, reg);
     }
 
     if text.is_empty() {
@@ -2831,7 +2830,7 @@ fn eval_json_item_js(script: &str, item: &Value, base_url: &str) -> anyhow::Resu
         //
         // 不设置时每条都会命中页面上的第一个匹配(或取不到), 典型后果是
         // 列表项地址为空 —— 发现页的书全部解析不出来(书海空白)。
-        let scope = serde_json::to_string(&element_snapshot_html(item))
+        let scope = serde_json::to_string(&element_snapshot_html(item).0)
             .unwrap_or_else(|_| "\"\"".to_string());
         format!("try{{java.setContent({scope});}}catch(e){{}}\n{script}")
     } else {
@@ -2914,26 +2913,78 @@ fn is_element_snapshot(item: &Value) -> bool {
     object.contains_key("outerHtml") || object.contains_key("innerHtml")
 }
 
+/// 元素快照还原成 HTML 时需要的**解析上下文**。
+///
+/// HTML5 解析器会丢弃「没有表格/列表上下文」的孤立标签: 单独一串
+/// `<tr><td>…` 交给 `parse_document` 后 `tr`/`td` 全部消失(实测 0 个元素)。
+/// 搜索结果的 `bookList` 交出 `tr#nr` 列表时, 字段规则 `td:nth-of-type(1) a@text`
+/// 因此恒为空 —— 表现为「能搜到但搜索结果 0 条」。
+///
+/// 返回 `(前缀, 后缀, 根元素选择器)`; 根选择器要在补完上下文后能命中快照元素
+/// (或其唯一祖先容器)。
+fn snapshot_wrapper(tag: &str) -> (&'static str, &'static str, &'static str) {
+    match tag.trim().to_ascii_lowercase().as_str() {
+        "tr" => ("<table><tbody>", "</tbody></table>", "body > table > tbody > tr"),
+        "td" => (
+            "<table><tbody><tr>",
+            "</tr></tbody></table>",
+            "body > table > tbody > tr > td",
+        ),
+        "th" => (
+            "<table><tbody><tr>",
+            "</tr></tbody></table>",
+            "body > table > tbody > tr > th",
+        ),
+        "tbody" => ("<table>", "</table>", "body > table > tbody"),
+        "thead" => ("<table>", "</table>", "body > table > thead"),
+        "tfoot" => ("<table>", "</table>", "body > table > tfoot"),
+        "caption" => ("<table>", "</table>", "body > table > caption"),
+        "colgroup" => ("<table>", "</table>", "body > table > colgroup"),
+        "col" => (
+            "<table><colgroup>",
+            "</colgroup></table>",
+            "body > table > colgroup > col",
+        ),
+        "li" => ("<ul>", "</ul>", "body > ul > li"),
+        "dt" => ("<dl>", "</dl>", "body > dl > dt"),
+        "dd" => ("<dl>", "</dl>", "body > dl > dd"),
+        "option" => ("<select>", "</select>", "body > select > option"),
+        "optgroup" => ("<select>", "</select>", "body > select > optgroup"),
+        "legend" => ("<fieldset>", "</fieldset>", "body > fieldset > legend"),
+        _ => ("", "", "body > *"),
+    }
+}
+
 /// 把元素快照还原成 HTML 片段, 交给 CSS 引擎求值。
 ///
 /// 优先用 `outerHtml`(含元素自身, 与 legado 一致: `result` 就是那个元素);
-/// 缺它时用 `tag` + `innerHtml` 拼一个。
-fn element_snapshot_html(item: &Value) -> String {
-    if let Some(outer) = item.get("outerHtml").and_then(Value::as_str) {
-        if !outer.trim().is_empty() {
-            return format!("<body>{outer}</body>");
-        }
-    }
+/// 缺它时用 `tag` + `innerHtml` 拼一个。返回 `(html, 根元素选择器)` ——
+/// 表格/列表类标签必须补上下文, 见 [`snapshot_wrapper`]。
+fn element_snapshot_html(item: &Value) -> (String, &'static str) {
     let tag = item
         .get("tag")
         .and_then(Value::as_str)
         .filter(|tag| !tag.trim().is_empty())
         .unwrap_or("div");
-    let inner = item
-        .get("innerHtml")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    format!("<body><{tag}>{inner}</{tag}></body>")
+    let (prefix, suffix, root_selector) = snapshot_wrapper(tag);
+    let body = if let Some(outer) = item.get("outerHtml").and_then(Value::as_str) {
+        if !outer.trim().is_empty() {
+            outer.to_string()
+        } else {
+            let inner = item
+                .get("innerHtml")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            format!("<{tag}>{inner}</{tag}>")
+        }
+    } else {
+        let inner = item
+            .get("innerHtml")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        format!("<{tag}>{inner}</{tag}>")
+    };
+    (format!("{prefix}{body}{suffix}"), root_selector)
 }
 
 fn eval_field_json_with_ctx(
@@ -2949,9 +3000,9 @@ fn eval_field_json_with_ctx(
     // 走 JSON 分支时 `h4@text` 会被当成"取 JSON 的 h4 字段", 恒为空 ——
     // 表现为搜索结果 0 条、目录 0 章。
     if is_element_snapshot(v) && rule_needs_css_from_snapshot(rule) {
-        let doc_html = element_snapshot_html(v);
+        let (doc_html, root_selector) = element_snapshot_html(v);
         let doc = html::parse_document(&doc_html);
-        let root_sel = scraper::Selector::parse("body > *").ok()?;
+        let root_sel = scraper::Selector::parse(root_selector).ok()?;
         let root: Vec<_> = doc.select(&root_sel).collect();
         return match root.first() {
             Some(el) => eval_field_html_with_ctx(rule, el, base_url, &mut HashMap::new()),

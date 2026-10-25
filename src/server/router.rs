@@ -40,6 +40,19 @@ use serde_json::Value;
 /// 提示永远看不到。1KB 足够覆盖这些固定开销。
 const MULTIPART_OVERHEAD: usize = 1024;
 
+/// `/reader3` 那批 JSON 接口的请求体上限。
+///
+/// axum 0.7 对 `Json` extractor 默认只放行 2MB（`DefaultBodyLimit::max(2MB)`）。
+/// 单条书源常有几十 KB，两千条级别的书源集/规则集轻松超过 2MB —— 批量导入会
+/// 在 extractor 层被 413 拒掉，且错误发生在业务代码之前，提示只有一句
+/// "Failed to buffer the request body"。这里按"整份 JSON 集合"的量级放宽到
+/// 64MB：实测最大的在线书源集 8.9MB / 836 条、单条最大 1.9MB（番茄、起点），
+/// 64MB 留足余量，同时仍是一条能挡住误传几百 MB 文件的边界。
+///
+/// 不设成无限：`/reader3` 没有鉴权，放开到局域网时任何同网段设备都能打；
+/// 一条限值至少保证不会因为一个畸形请求把内存吃干。
+const JSON_BODY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+
 /// 给上传路由算 body 上限。抽成函数是为了能单测"这层真的存在" ——
 /// 具体回归见 `tests::upload_routes_lift_the_two_megabyte_default`。
 fn multipart_body_limit(max_file_bytes: usize) -> DefaultBodyLimit {
@@ -140,6 +153,10 @@ pub fn build(state: AppState, _options: WebOptions, static_source: Option<Static
         .route("/api/health", get(health))
         // ─── 本地书上传 (WiFi 传书), 各自带匹配的 body 上限 ───
         .merge(upload_router(state.clone()))
+        // JSON 批量导入放宽到 64MB。这里必须在 `with_state` 之前、且作为整个
+        // `api` 路由的 layer：逐条 `.route(...)` 上挂要写 28 次，漏一个就又是
+        // 2MB。上传路由自带更严的 multipart 上限，叠加后取较小者，不受影响。
+        .layer(DefaultBodyLimit::max(JSON_BODY_LIMIT_BYTES))
         .with_state(state);
 
     // 不做鉴权, 与手机端 Legado 的 HTTP Server 一致:
@@ -670,5 +687,65 @@ mod tests {
     fn body_limit_leaves_room_for_multipart_envelope() {
         // 恰好等于业务上限的文件不能被信封开销挤掉。
         assert!(MULTIPART_OVERHEAD >= 256);
+    }
+
+    /// 回归: `/reader3` 的 JSON 批量导入必须能超过 axum 的 2MB 默认上限。
+    ///
+    /// 修复前保存 300 条书源（约 2.4MB）会被 extractor 层直接 413，前端只看到
+    /// "请求失败"，而业务代码里根本没有跟大小相关的分支 —— 用户会以为是书源
+    /// 数据坏了。这里用 4MB 的 JSON 打到一个只挂 `DefaultBodyLimit` 的路由上，
+    /// 断言它能进 handler。
+    #[tokio::test]
+    async fn json_routes_lift_the_two_megabyte_default() {
+        const FOUR_MB: usize = 4 * 1024 * 1024;
+
+        async fn echo_json_len(body: axum::body::Bytes) -> StatusCode {
+            let _ = body.len();
+            StatusCode::OK
+        }
+
+        let app: Router = Router::new()
+            .route("/saveBookSources", post(echo_json_len))
+            .layer(DefaultBodyLimit::max(JSON_BODY_LIMIT_BYTES));
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/saveBookSources")
+            .header("content-type", "application/json")
+            .body(Body::from(format!(
+                r#"{{"pad":"{}"}}"#,
+                "x".repeat(FOUR_MB)
+            )))
+            .unwrap();
+        assert_eq!(
+            app.oneshot(request).await.unwrap().status(),
+            StatusCode::OK,
+            "4MB 的 JSON 批量导入不该再被 2MB 默认上限拦下"
+        );
+    }
+
+    /// 放宽仍有边界: 超过 `JSON_BODY_LIMIT_BYTES` 的请求必须在 extractor 层被
+    /// 拒掉, 不能先整个读进内存。这里把上限临时压到 1KB 验证同一层生效。
+    #[tokio::test]
+    async fn json_routes_still_reject_oversized_bodies() {
+        async fn echo_json_len(body: axum::body::Bytes) -> StatusCode {
+            let _ = body.len();
+            StatusCode::OK
+        }
+
+        let app: Router = Router::new()
+            .route("/saveBookSources", post(echo_json_len))
+            .layer(DefaultBodyLimit::max(1024));
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/saveBookSources")
+            .header("content-type", "application/json")
+            .body(Body::from(format!(r#"{{"pad":"{}"}}"#, "x".repeat(4096))))
+            .unwrap();
+        assert_eq!(
+            app.oneshot(request).await.unwrap().status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
     }
 }

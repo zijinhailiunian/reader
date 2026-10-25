@@ -217,15 +217,17 @@
         <!-- 章节加载阶段：段评解析可能耗时数秒。做成浮层，三种阅读模式都能看到。 -->
         <div v-if="isHorizontalPageMode" class="horizontal-page-layout">
           <section class="horizontal-content-page">
-            <div
-              ref="chapterTextRef"
-              class="horizontal-pages"
-              :style="{
-                transform: horizontalPageTransform,
-                transitionDuration: horizontalPageTransitionDuration,
-              }"
-            >
-              <section v-for="(page, idx) in horizontalPages" :key="`h-page-${idx}`" class="horizontal-page">
+            <div ref="chapterTextRef" class="horizontal-pages">
+              <section
+                v-for="(page, idx) in horizontalPages"
+                :key="`h-page-${idx}`"
+                class="horizontal-page"
+                :style="{
+                  transform: horizontalPageTransform(idx),
+                  transitionDuration: horizontalPageTransitionDuration,
+                  willChange: horizontalPageWillChange(idx),
+                }"
+              >
                 <div
                   class="chapter-text horizontal-page-content"
                   :style="{
@@ -244,7 +246,7 @@
           <!-- 脚本规则没跑成时正文会回落到「不含脚本」的版本，与脚本本来就没启用
                看起来完全一样。必须显式说明，否则用户只会以为规则没效果。 -->
           <div v-if="store.replaceRulesDegraded" class="replace-rule-degraded">
-            本章有 {{ failedScriptRuleCount }} 条净化脚本未能执行，正文按未执行脚本处理。
+            本章有 {{ store.failedScriptRuleCount }} 条净化脚本未能执行，正文按未执行脚本处理。
             <button type="button" class="replace-rule-degraded-link" @click="store.openPanel('rule')">
               查看规则
             </button>
@@ -437,7 +439,7 @@ import {
   shouldRevealReaderControls,
 } from '../utils/readerHoverControls'
 import { resolveReaderBackTarget } from '../utils/readerBack'
-import { shouldPreferServerReadingPosition, type ReadingPositionSnapshot } from '../utils/readingPosition'
+import { shouldPreferServerReadingPosition, toMillis, type ReadingPositionSnapshot } from '../utils/readingPosition'
 import { isLocalBook, isLocalEpubBook } from '../utils/localBook'
 import { PDF_PAGE_ATTR, isPdfBook, releasePdfBook, renderPdfChapterPages } from '../utils/pdfPages'
 import { rewriteCssAssetUrls, toReaderAssetUrl } from '../utils/localEpubAsset'
@@ -1321,9 +1323,6 @@ const formattedContent = computed(() => {
   return formatChapterHtml(store.displayContent || '')
 })
 
-/** 降级提示里要说的脚本规则条数（取 store 里记录的真实失败条数）。 */
-const failedScriptRuleCount = computed(() => Object.keys(store.failedReplaceRules).length)
-
 /** 上一章 PDF 页渲染的释放函数: 换章/卸载时必须调用, 否则 canvas 与文档常驻 */
 let disposePdfPages: (() => void) | null = null
 
@@ -1397,12 +1396,31 @@ const {
   scrollContainerRef,
 )
 
-const horizontalPageTransform = computed(() => {
-  // 索引是**栏索引**(始终对齐到屏起始: 0 / 栏数 / 2×栏数 …), 位移 = 索引 × 单栏宽。
-  // 一屏恰好一页: 位移 = 页索引 × 屏宽(屏宽 = 容器宽)。
-  const offset = horizontalPageIndex.value * Math.max(1, horizontalPageStep.value)
-  return `translate3d(${-offset}px, 0, 0)`
-})
+/** 只有即将参与滑动的那几页才提升为独立合成层。
+ *
+ *  `will-change: transform` 会让元素**常驻**一个自己的光栅层。给每一页都加上它,
+ *  一章几十页时就是「视口大小 × 页数」的显存/纹理开销(1470×893×4B ≈ 5MB/页),
+ *  长章节下远超预算。而一次翻页真正要动起来的只有当前页与它的邻居, 其余页都
+ *  在裁剪区外, 交给浏览器按普通内容处理即可。 */
+function horizontalPageWillChange(pageIndex: number) {
+  const distance = Math.abs(pageIndex - horizontalPageIndex.value)
+  return distance <= 1 ? 'transform' : 'auto'
+}
+
+/** 第 `pageIndex` 页在当前页索引下的位移。
+ *
+ *  这里**每页各自平移**, 而不是把整章所有页排成一条超宽横带、再平移那条带:
+ *  后者会让 `.horizontal-pages` 变成一个「页数 × 屏宽」的巨型合成层(实测 10 页
+ *  在 1174 宽窗口下是 14675×897 设备像素)。Chromium 对这种尺寸只能分块光栅,
+ *  且**换章时不会可靠地让旧块失效** —— 屏幕上会残留上一章同一页码位置的文字
+ *  位图, 它不属于 DOM(无法选中), 改窗口大小或重进阅读页重建层后才消失。
+ *  现在布局宽度恒为一页, 每页各自是一个独立的小层, 不存在需要分块的超宽层。 */
+function horizontalPageTransform(pageIndex: number) {
+  // 一屏恰好一页: 让第 pageIndex 页落到视口, 它要移动 (当前页 - 自己) 个屏宽。
+  const step = Math.max(1, horizontalPageStep.value)
+  const offset = (pageIndex - horizontalPageIndex.value) * step
+  return `translate3d(${offset}px, 0, 0)`
+}
 /** 一次跨过很多页时, 给新画面的淡入时长。跨章不做长距离滑动, 只留一个短促分界。 */
 const HORIZONTAL_JUMP_FADE_MS = 150
 
@@ -1781,9 +1799,16 @@ function persistReadingProgressTemporaryKeepalive() {
   readerProgressExitSaver.flushTemporaryKeepalive()
 }
 
-/** 页面隐藏或离开前，先把实际视口位置写回阅读状态。 */
+/** 页面隐藏或离开前，先把实际视口位置写回阅读状态。
+ *
+ *  左右分页模式**跳过**: 那里的进度由 `syncHorizontalPageState()` 在每次翻页时
+ *  写进 store(进度 = 页索引 / 末页索引), 已经是权威值。而 `handleScroll` 要用
+ *  `updateHorizontalMetrics()` + `clampReaderPageIndex()` 重新推一遍 —— 退出瞬间
+ *  容器尺寸/分页可能正在变化, 推出来的页索引会比实际小一页, 于是把用户刚读到的
+ *  位置改小; 下次打开就落在前一页(症状: "退出一页、重开少读一页")。 */
 function captureProgressForSync() {
   if (!scrollContainerRef.value || !store.book || store.loading) return
+  if (isHorizontalPageMode.value) return
   handleScroll()
 }
 
@@ -1974,7 +1999,9 @@ function buildServerSavedPosition(): SavedReadingPosition | null {
   return {
     chapterIndex: snapshot.index,
     progress: Math.max(0, Math.min(1, progress || 0)),
-    updatedAt: snapshot.time,
+    // `durChapterTime` 是 Unix 秒, 本地快照是毫秒 —— 统一成毫秒, 免得
+    // 任何基于时间戳的取舍把书架记录当成 1970 年的数据。
+    updatedAt: toMillis(snapshot.time),
   }
 }
 
@@ -2036,10 +2063,15 @@ function loadSavedReadingPosition() {
     }
 
     if (serverSaved && serverSaved.chapterIndex === store.currentIndex) {
-      // 两个来源进度一致时保留本地(带段落级精度 paragraphIndex);
-      // 远端进度已按章节和字符位置确认更靠后，这里不再比较时间。
-      // 电脑初始化过程可能刚把本地位置写成章节开头，但时间戳更新。
-      if (shouldPreferServerReadingPosition(selected, serverSaved)) {
+      // 两个来源章号相同时**永远保留本地**: 本地是逐页写下的, 还带段落级锚点
+      // (`paragraphIndex`), 恢复能精确到段; 书架那条由 10 秒自动保存与换章瞬间
+      // 写入, 既粗糙又可能滞后。
+      //
+      // 早先这里用「进度差 ≥ 2%」决定要不要换成书架 —— 不看方向, 于是无论用户
+      // 往后读还是往回读, 退出时那条更早的书架记录都会盖掉刚写下的位置:
+      // 往后读会退回上一次的段落, 往回读会被拉回之前读得更远的地方。
+      // 这里只在本地缺失时才会走到 server, 见下方 `if (!selected)`。
+      if (!selected && shouldPreferServerReadingPosition(selected, serverSaved)) {
         selected = serverSaved
         source = 'server'
       }
@@ -2085,6 +2117,23 @@ function saveReadingPosition(options: { force?: boolean } = {}) {
   const key = getPositionStorageKey()
   const container = scrollContainerRef.value
   const suppressed = !options.force && Date.now() < suppressPositionSaveUntil
+  // 退出阅读页时组件已经卸载、容器 ref 已置空, 但这次写入恰恰最要紧:
+  // 它是「下次打开落在原处」的唯一保证。此时用 store 里最后已知的进度兜底,
+  // 只是拿不到段落锚点(段落位置需要 DOM), 章节 + 进度比例已经足够恢复。
+  if (options.force && key && !container && store.book && !store.loading) {
+    const fallback: SavedReadingPosition = {
+      chapterIndex: store.currentIndex,
+      progress: Math.max(0, Math.min(1, store.chapterScrollProgress || 0)),
+      updatedAt: Date.now(),
+    }
+    try {
+      localStorage.setItem(key, JSON.stringify(fallback))
+      debugPositionLog('saved position (force, no container)', { key, position: fallback })
+    } catch {
+      debugPositionLog('failed to save position (force, no container)', { key })
+    }
+    return
+  }
   if (!key || !container || store.loading || !store.book || suppressed) {
     debugPositionLog('skip save', {
       key,
@@ -3260,8 +3309,8 @@ const readingModeKind = computed<'paged' | 'scroll'>(() => (
  *
  *  浏览器里(开发调试)没有 Tauri API, 回退到 HTML5 全屏。
  *
- *  「最大化状态下进全屏会露出任务栏高度的黑边」由 **tao 的 vendor 补丁**根治:
- *  见 Cargo.toml 的 [patch.crates-io]/tao 与 vendor/tao 里的 VENDOR PATCH 注释。
+ *  「最大化状态下进全屏会露出任务栏高度的黑边」由 tao 修好(tauri-apps/tao#1353,
+ *  tao 0.37.2 起包含; 早期用 vendor 副本, 现已改回官方版本)。
  *
  *  这里刻意**不再**用「进全屏前先 unmaximize、退出后再 maximize」的变通。那虽
  *  也能绕开黑边, 但 unmaximize/maximize 各对应一次 ShowWindow(SW_RESTORE) /
@@ -4444,19 +4493,20 @@ watch(
   margin: 0;
   height: 100%;
   min-height: 100%;
-  width: max-content;
-  min-width: 100%;
+  /* 分页模式下宽度恒为一页(不再是 max-content 的超宽横带)。 */
+  width: var(--reader-page-step);
+  min-width: var(--reader-page-step);
   padding: 0;
 }
 
 .horizontal-page-layout {
-  width: max-content;
+  width: var(--reader-page-step);
   min-width: var(--reader-page-step);
   height: 100%;
 }
 
 .horizontal-content-page {
-  width: max-content;
+  width: var(--reader-page-step);
   min-width: var(--reader-page-step);
   height: 100%;
   min-height: 100%;
@@ -4464,29 +4514,43 @@ watch(
   box-sizing: border-box;
 }
 
+/* 分页视口: 尺寸恒为一页, 且**裁剪**掉溢出的一页。
+   裁剪不只是为了视觉 —— 它同时把这一层的绘制/光栅边界钉在「一屏」大小。
+   早先这里是 `display:flex; width:max-content`, 整章所有页横向排成一条超宽横带
+   (10 页 × 1174 = 14675px), 再由父层整体 translate3d 平移; WebView2 对这么大的
+   合成层只能分块光栅, 换章后旧块有时不失效, 于是屏幕上残留上一章同页码位置的
+   文字位图 —— 它不在 DOM 里(选不中), 改窗口大小或重进阅读页才恢复。 */
 .horizontal-pages {
-  display: flex;
-  width: max-content;
+  position: relative;
+  width: 100%;
   height: 100%;
   min-height: 100%;
-  transform: translate3d(0, 0, 0);
-  transition-property: transform;
-  transition-timing-function: cubic-bezier(0.22, 0.61, 0.36, 1);
-  will-change: transform;
+  overflow: hidden;
 }
 
 /* 一页 = 一屏：宽度恒等于容器宽(--reader-page-step 由 JS 写为容器宽)。
    正文的**行宽**由里面的 .horizontal-page-content 单独控制, 并在页内居中,
    所以宽窗口下是「正文居中 + 两侧留白」, 而不是一屏并排显示两页。
    这里的左右 padding 必须与 useHorizontalPaging 的 HORIZONTAL_PAGE_SIDE_PADDING
-   保持一致 —— 那边用它算行宽的可用宽度, 不一致会让测量与实际排版不符。 */
+   保持一致 —— 那边用它算行宽的可用宽度, 不一致会让测量与实际排版不符。
+
+   每页**各自**用 transform 定位(见 horizontalPageTransform): 当前页位移为 0,
+   其余页平移 ±n 个屏宽。这样每个合成层都只有一页大小, 不存在超宽层; 翻页动画
+   仍然是「旧页滑出、新页滑入」, 观感与整体平移一致。 */
 .horizontal-page {
+  position: absolute;
+  top: 0;
+  left: 0;
   width: var(--reader-page-step);
   min-width: var(--reader-page-step);
   height: 100%;
   min-height: 100%;
   padding: var(--reader-page-vertical-padding) var(--reader-side-padding);
   box-sizing: border-box;
+  transition-property: transform;
+  transition-timing-function: cubic-bezier(0.22, 0.61, 0.36, 1);
+  /* will-change 由 horizontalPageWillChange 逐页给出(只有参与滑动的相邻页需要),
+     不要在这里写死: 那会让每一页都常驻一个视口大小的光栅层。 */
 }
 
 .continuous-reading {

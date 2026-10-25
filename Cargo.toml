@@ -1,6 +1,6 @@
 [package]
 name = "reader-rust"
-version = "1.5.9"
+version = "1.6.0"
 edition = "2021"
 
 # The desktop app is a workspace member so it shares this target/ directory, but
@@ -97,13 +97,10 @@ tower = { version = "0.5", features = ["util"] }
 # panic (LaTeX CJK 产物常见)。vendor 副本加了 GBK/Big5 系 CMap 的近似解码:
 # 恒等字节映射 + encoding_rs 逐码位解码当伪 ToUnicode 表。
 #
-# tao 0.35.3 在 Windows 上有一个「最大化后进无边框全屏会露出任务栏高度的黑边」
-# 的 bug: WM_NCCALCSIZE 把最大化窗口的客户区钳到显示器工作区(rcWork), 而窗口
-# 本身已是整屏尺寸。上游 tauri-apps/tao#1353 已修复(2026-09-30 合并), 但**尚未
-# 随任何 release 发布**(最新 release tao-v0.37.1 早于该合并)。vendor 副本只改了
-# 那一行 —— 见 src/platform_impl/windows/event_loop.rs 的 VENDOR PATCH 注释。
-# 补丁存在期间前端不需要 unmaximize 变通, 退出全屏因此没有两段动画。
-# 上游发布含修复的版本后, 删除 vendor/tao 与本条目即可。
+# tao 不再 vendor: 0.37.2 已包含 tauri-apps/tao#1353 的修复(「最大化后进无边框
+# 全屏会在底部露出任务栏高度的空隙」), 也就是当初打补丁的唯一原因。用官方版本
+# 后前端同样不需要 unmaximize 变通, 退出全屏仍是一步到位。
+# 注意 tao 由 tauri-runtime-wry 引入, 升级 tauri 必须同步到 2.12.x —— 2.11.x
+# 约束的是 tao 0.35, 换不上去。
 [patch.crates-io]
 pdf-extract = { path = "vendor/pdf-extract" }
-tao = { path = "vendor/tao" }

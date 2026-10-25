@@ -1,7 +1,7 @@
 {
   "name": "reader-desktop",
   "private": true,
-  "version": "1.5.9",
+  "version": "1.6.0",
   "scripts": {
     "icon": "tauri icon ../frontend/public/icon-master-1024.png",
     "dev": "tauri dev --no-watch",

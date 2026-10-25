@@ -137,20 +137,16 @@
                 :class="{ on: getScopeMode(editingRule) === 'global' }"
                 @click="setScopeMode('global')"
               >全部书籍</button>
-              <!-- 「当前书籍 / 当前书源」需要阅读上下文。从主设置打开时没有打开中的书,
-                   这两个按钮点下去只会静默无效, 因此直接不显示。 -->
-              <template v-if="!props.standalone">
-                <button
-                  type="button"
-                  :class="{ on: getScopeMode(editingRule) === 'book' }"
-                  @click="setScopeMode('book')"
-                >当前书籍</button>
-                <button
-                  type="button"
-                  :class="{ on: getScopeMode(editingRule) === 'source' }"
-                  @click="setScopeMode('source')"
-                >当前书源</button>
-              </template>
+              <button
+                type="button"
+                :class="{ on: getScopeMode(editingRule) === 'book' }"
+                @click="setScopeMode('book')"
+              >当前书籍</button>
+              <button
+                type="button"
+                :class="{ on: getScopeMode(editingRule) === 'source' }"
+                @click="setScopeMode('source')"
+              >当前书源</button>
             </div>
             <p class="field-hint">{{ describeScope(editingRule.scope) }}</p>
           </div>
@@ -242,20 +238,11 @@ const store = useReaderStore()
 const appStore = useAppStore()
 
 /**
- * 独立模式：从主设置抽屉打开时用。
- *
- * 此时组件不在阅读页的面板栈里，`store.backPanel()` 无从回退，所以关闭动作改成
- * 向上抛事件；主题仍复用 `chromeTheme`（它只依赖全局主题与背景图配置，与是否
- * 正在阅读无关），因此观感与阅读页里一致。
+ * 净化规则面板。只在阅读页的面板栈里用（`store.openPanel('rule')`），关闭即
+ * `store.backPanel()`；没有「独立模式」—— 主设置抽屉里曾经复用它，那个入口已
+ * 移除，因为规则的作用域（当前书籍 / 当前书源）本身就要有阅读上下文。
  */
-const props = withDefaults(defineProps<{ standalone?: boolean }>(), { standalone: false })
-const emit = defineEmits<{ close: [] }>()
-
 function handleClose() {
-  if (props.standalone) {
-    emit('close')
-    return
-  }
   store.backPanel()
 }
 

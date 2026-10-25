@@ -126,9 +126,20 @@
       </div>
       </template>
 
+      <!--
+        部分书源失败：一条提示 + 一个明确动作。
+        改版前是 `justify-content: space-between` 且没有左右内边距 —— 文字贴在
+        列表左边缘、按钮贴到右边缘，两者之间空出一大段，看起来像两件无关的东西。
+        现在收成一个带底色的小卡：图标 + 说明在左，重试按钮紧跟其后（不是顶到最右），
+        左右边距与候选列表的 12px 对齐。
+      -->
       <div v-if="sourcesIncomplete && !searching && !loadingMore" class="source-incomplete" role="status">
-        <span>部分书源访问失败，可重试。</span>
-        <button type="button" class="load-more-btn" @click="startSearch(true)">重试</button>
+        <svg class="incomplete-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+          <circle cx="12" cy="12" r="9" />
+          <path d="M12 7.5v5.5M12 16.5h.01" />
+        </svg>
+        <span class="incomplete-text">部分书源访问失败</span>
+        <button type="button" class="incomplete-retry" @click="startSearch(true)">重试</button>
       </div>
       <div v-if="hasMoreSources && !searching" class="load-more-wrap">
         <button class="load-more-btn" :disabled="loadingMore" @click="loadMoreSources">
@@ -608,7 +619,58 @@ async function handleSwitch(res: SearchBook) {
   outline-offset: 1px;
 }
 
-.source-incomplete { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; font-size: 12px; opacity: .85; }
+/* ─── 部分书源失败提示 ───
+ * 一条轻量提示，不是列表项也不是两级页脚。左右边距与 .candidate-list 的 12px
+ * 对齐，内部 12px 与候选卡的内容缩进一致；重试按钮跟在文字后面，不顶到最右 ——
+ * 顶到最右会和上面的列表行抢视觉重心，看起来像一个孤立的次要操作。 */
+.source-incomplete {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 12px 10px;
+  padding: 9px 10px 9px 12px;
+  border-radius: 12px;
+  background: color-mix(in srgb, currentColor 4%, transparent);
+  border: 1px solid color-mix(in srgb, currentColor 8%, transparent);
+  font-size: 12px;
+  line-height: 1.4;
+  color: color-mix(in srgb, currentColor 62%, transparent);
+}
+
+.incomplete-icon {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  color: var(--color-primary, #c97f3a);
+  opacity: 0.85;
+}
+
+.incomplete-text {
+  min-width: 0;
+  flex: 1;
+}
+
+.incomplete-retry {
+  flex: 0 0 auto;
+  padding: 4px 12px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--color-primary, #c97f3a) 34%, transparent);
+  background: color-mix(in srgb, var(--color-primary, #c97f3a) 12%, transparent);
+  color: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.16s ease, border-color 0.16s ease;
+}
+
+.incomplete-retry:hover {
+  background: color-mix(in srgb, var(--color-primary, #c97f3a) 20%, transparent);
+  border-color: var(--color-primary, #c97f3a);
+}
+
+.incomplete-retry:active {
+  transform: scale(0.97);
+}
 
 .source-list {
   flex: 1;

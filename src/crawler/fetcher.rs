@@ -173,6 +173,22 @@ async fn fetch_inner(
         }
 
         let mut has_content_type = false;
+        // 显式把 `Host` 放在第一个首部。
+        //
+        // Cloudflare 的托管挑战会按首部写法识别客户端: 同一请求把 `Host` 放在
+        // 首位、其余首部用 Title-Case 就返回 200, 换成 hyper 默认的「Host 最后 +
+        // 全小写」就是 403 `cf-mitigated: challenge`(实测, 逐项二分确认)。
+        // hyper 在没有显式 `Host` 时会自己补一个并放在最后, 所以书源请求需显式给出;
+        // 地址里带的端口/用户信息由 `host_header_value` 处理。
+        if let Some(host) = host_header_value(&req.url) {
+            let already = req
+                .headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("host"));
+            if !already {
+                builder = builder.header(reqwest::header::HOST, host);
+            }
+        }
         for (k, v) in &req.headers {
             if k.to_lowercase() == "content-type" {
                 has_content_type = true;
@@ -300,6 +316,24 @@ pub(crate) fn decode_body(bytes: &[u8], charset: Option<&str>, content_type: Opt
 /// 比让每条 JSON 规则各自容错更彻底。
 fn strip_bom(text: &str) -> &str {
     text.strip_prefix('\u{feff}').unwrap_or(text)
+}
+
+/// 从 URL 里取出 `Host` 首部的值(含非默认端口, 去掉 userinfo)。
+///
+/// 显式 `Host` 是为了让首部顺序与真实浏览器一致(见 `fetch_inner` 里的说明)。
+/// IPv6 字面量要保留方括号; 解析失败时返回 `None`, 交给 hyper 自行补。
+fn host_header_value(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    let host = parsed.host_str()?;
+    let bracketed = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    Some(match parsed.port() {
+        Some(port) => format!("{bracketed}:{port}"),
+        None => bracketed,
+    })
 }
 
 pub(crate) fn data_uri_response(req: &RequestSpec) -> anyhow::Result<Option<FetchResponse>> {

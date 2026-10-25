@@ -225,7 +225,7 @@ fn build_client(timeout_secs: u64, proxy: Option<&str>) -> anyhow::Result<Client
 }
 
 pub(crate) fn build_source_client(timeout_secs: u64, proxy: Option<&str>, jar: Arc<super::source_session::SourceCookieJar>) -> anyhow::Result<Client> {
-    build_client_builder(timeout_secs, proxy)?.cookie_provider(jar).build().map_err(Into::into)
+    build_source_builder(timeout_secs, proxy)?.cookie_provider(jar).build().map_err(Into::into)
 }
 
 /// 与 [`build_source_client`] 相同, 但不跟随 3xx。
@@ -235,7 +235,7 @@ pub(crate) fn build_source_client(timeout_secs: u64, proxy: Option<&str>, jar: A
 /// 先用搜索词换一个 `searchid`, 再拿它拼结果页地址。跟随后 `Location` 消失,
 /// 脚本在 `location.match(...)` 处抛空引用, 整个搜索直接失败。
 pub(crate) fn build_source_client_no_redirect(timeout_secs: u64, proxy: Option<&str>, jar: Arc<super::source_session::SourceCookieJar>) -> anyhow::Result<Client> {
-    build_client_builder(timeout_secs, proxy)?
+    build_source_builder(timeout_secs, proxy)?
         .redirect(reqwest::redirect::Policy::none())
         .cookie_provider(jar)
         .build()
@@ -248,7 +248,7 @@ pub(crate) fn build_source_client_no_redirect(timeout_secs: u64, proxy: Option<&
 /// `Content-Encoding`(例如源脚本自己 new GZIPInputStream), 自动解压会把已解压
 /// 的正文再解一次并丢掉原始头部, 因此这条路径必须拿到未解码的字节。
 pub(crate) fn build_raw_source_client(timeout_secs: u64, proxy: Option<&str>, jar: Arc<super::source_session::SourceCookieJar>) -> anyhow::Result<Client> {
-    build_client_builder(timeout_secs, proxy)?
+    build_source_builder(timeout_secs, proxy)?
         .gzip(false)
         .brotli(false)
         .deflate(false)
@@ -258,9 +258,30 @@ pub(crate) fn build_raw_source_client(timeout_secs: u64, proxy: Option<&str>, ja
 }
 
 fn build_client_builder(timeout_secs: u64, proxy: Option<&str>) -> anyhow::Result<reqwest::ClientBuilder> {
-    let mut builder = Client::builder()
-        .timeout(Duration::from_secs(timeout_secs))
+    let builder = build_builder_base(timeout_secs, proxy)?
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+    Ok(builder)
+}
+
+/// 书源请求用的 builder: 在通用配置之上打开 **浏览器风格的首部写法**。
+///
+/// Cloudflare 的托管挑战(managed challenge)对某些站点不只看 UA, 还看首部的
+/// **大小写与顺序**: 同一份 `User-Agent` 用 `user-agent`(全小写)发出去直接
+/// `403 cf-mitigated: challenge`, 改成 `User-Agent` 并把 `Host` 放在第一个首部
+/// 就返回 200(实测站点上逐项二分确认)。reqwest/hyper 默认把首部全小写化 ——
+/// 与真实浏览器(Chrome 发的是 Title-Case)不一致, 于是「手机端能读、桌面端
+/// 整页被拦」。
+///
+/// `http1_title_case_headers` 只影响 HTTP/1.x(h2 要求小写, hyper 会自行处理),
+/// 显式 `Host` 由 [`crate::crawler::fetcher`] 注入到请求首位。
+fn build_source_builder(timeout_secs: u64, proxy: Option<&str>) -> anyhow::Result<reqwest::ClientBuilder> {
+    Ok(build_builder_base(timeout_secs, proxy)?
+        .http1_title_case_headers()
+        .http1_only())
+}
+
+fn build_builder_base(timeout_secs: u64, proxy: Option<&str>) -> anyhow::Result<reqwest::ClientBuilder> {
+    let mut builder = Client::builder().timeout(Duration::from_secs(timeout_secs));
     if let Some(proxy) = proxy {
         let bypass = NoProxy::from_string("localhost,127.0.0.1,::1");
         builder = builder.proxy(Proxy::all(proxy)?.no_proxy(bypass));

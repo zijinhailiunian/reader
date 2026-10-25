@@ -189,8 +189,12 @@
             <!-- 单源模式下不提供「重试」：它的语义是"再并搜一遍其它源"，
                  而这时我们刻意不搜。 -->
             <div v-if="!singleSourceOnly && sourcesIncomplete && !sourcesLoading" class="source-incomplete" role="status">
-              <span>部分书源访问失败，可重试。</span>
-              <button type="button" @click="loadSourceCandidates(detailLoadId, detailKey, true)">重试</button>
+              <svg class="incomplete-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+                <circle cx="12" cy="12" r="9" />
+                <path d="M12 7.5v5.5M12 16.5h.01" />
+              </svg>
+              <span class="incomplete-text">部分书源访问失败</span>
+              <button type="button" class="incomplete-retry" @click="loadSourceCandidates(detailLoadId, detailKey, true)">重试</button>
             </div>
           </div>
 
@@ -1445,8 +1449,51 @@ async function removeFromShelf() {
   font-size: var(--text-sm);
 }
 
-.source-incomplete { display: flex; align-items: center; gap: 12px; margin-top: 12px; color: var(--color-text-secondary); font-size: var(--text-sm); }
-.source-incomplete button { padding: 4px 10px; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg); color: var(--color-text); cursor: pointer; }
+/* 与阅读页「切换书源」面板的提示条同一套观感：图标 + 说明在左，重试跟在文字后。 */
+.source-incomplete {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 9px 10px 9px 12px;
+  border-radius: var(--radius-md);
+  background: var(--color-bg-sunken);
+  border: 1px solid var(--color-border-light);
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.4;
+}
+
+.source-incomplete .incomplete-icon {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  color: var(--color-primary);
+  opacity: 0.85;
+}
+
+.source-incomplete .incomplete-text {
+  min-width: 0;
+  flex: 1;
+}
+
+.source-incomplete .incomplete-retry {
+  flex: 0 0 auto;
+  padding: 4px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-primary-border);
+  background: var(--color-primary-bg);
+  color: var(--color-text);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.16s ease, border-color 0.16s ease;
+}
+
+.source-incomplete .incomplete-retry:hover {
+  background: var(--color-selected-bg-hover);
+  border-color: var(--color-primary);
+}
 
 .source-list {
   border: 1px solid var(--color-border-light);
