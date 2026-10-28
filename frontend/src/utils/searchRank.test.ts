@@ -54,6 +54,7 @@ describe('rankSearchResults', () => {
     expect(isSearchResultRelevant(book({ name: '某书', author: '作者：测试作者' }), '测 试作者')).toBe(true)
     expect(isSearchResultRelevant(book({ name: '某书', kind: '都市 / 重生' }), '重生')).toBe(true)
     expect(isSearchResultRelevant(book({ name: '凡人修仙传', author: '忘语' }), '遮天')).toBe(false)
+    expect(isSearchResultRelevant(book({ name: '穿越神雕：我为西狂', author: '新安君' }), '穿越神雕 我为西狂')).toBe(true)
   })
 })
 

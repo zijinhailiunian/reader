@@ -153,6 +153,7 @@ export function matchesSourceSwitchTitle(currentTitle: string, candidateTitle: s
   return current.length > 0 && current === candidateTitle.replace(/\s+/g, '')
 }
 
+// 标点也要去掉: 书名「穿越神雕：我为西狂」, 用户常输「穿越神雕 我为西狂」, 只去空格会把所有结果都滤掉。
 function normalizeSearchText(value: string): string {
-  return value.trim().toLocaleLowerCase().replace(/\s+/g, '')
+  return value.trim().toLocaleLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '')
 }
